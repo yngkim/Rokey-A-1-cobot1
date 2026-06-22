@@ -1,8 +1,6 @@
-"""500ml 페트병에서 컵으로 물 따르기."""
+"""500ml 페트병에서 컵으로 물 따르기 — 완만한 기울이기 + 유지."""
 
 from __future__ import annotations
-
-import time
 
 from cobot1.tasks.base import BaseTask
 
@@ -12,7 +10,7 @@ class PourWaterTask(BaseTask):
 
     def _hold_pour(self, task: str, duration_sec: float) -> None:
         self._motion.publish_status(task, "hold_pour", "running")
-        time.sleep(float(duration_sec))
+        self._motion.interruptible_sleep(float(duration_sec))
         self._motion.publish_status(task, "hold_pour", "done")
 
     def _execute(self) -> None:
@@ -21,6 +19,9 @@ class PourWaterTask(BaseTask):
         bottle = cfg["bottle_pose"]
         cup = cfg["cup_pose"]
         task = self.name
+        grasp_z = cfg["grasp_offset_z_mm"]
+        pour_vel = self._scenarios["motion"].get("pour_vel")
+        pour_acc = self._scenarios["motion"].get("pour_acc")
 
         motion.gripper.open()
 
@@ -28,26 +29,18 @@ class PourWaterTask(BaseTask):
             ("home", lambda: motion.go_home(task)),
             (
                 "approach_bottle",
-                lambda: motion.approach_pose(
-                    bottle,
-                    cfg["grasp_offset_z_mm"],
-                    "approach_bottle",
-                    task,
-                ),
+                lambda: motion.approach_pose(bottle, grasp_z, "approach_bottle", task),
             ),
             (
                 "grasp_bottle",
                 lambda: motion.move_relative_tool(
-                    [0.0, 0.0, -cfg["grasp_offset_z_mm"], 0.0, 0.0, 0.0],
+                    [0.0, 0.0, -grasp_z, 0.0, 0.0, 0.0],
                     "grasp_bottle",
                     task,
                 ),
             ),
             ("close_gripper", motion.gripper.close),
-            (
-                "lift_bottle",
-                lambda: motion.retreat_z(cfg["grasp_offset_z_mm"], "lift_bottle", task),
-            ),
+            ("lift_bottle", lambda: motion.retreat_z(grasp_z, "lift_bottle", task)),
             (
                 "move_above_cup",
                 lambda: motion.approach_pose(
@@ -58,11 +51,17 @@ class PourWaterTask(BaseTask):
                 ),
             ),
             (
+                "pre_pour_pause",
+                lambda: motion.interruptible_sleep(cfg.get("pre_pour_pause_sec", 0.5)),
+            ),
+            (
                 "tilt_pour",
                 lambda: motion.move_relative_tool(
                     [0.0, 0.0, 0.0, 0.0, cfg["pour_tilt_deg"], 0.0],
                     "tilt_pour",
                     task,
+                    vel=pour_vel,
+                    acc=pour_acc,
                 ),
             ),
             (
@@ -75,6 +74,8 @@ class PourWaterTask(BaseTask):
                     [0.0, 0.0, 0.0, 0.0, -cfg["pour_tilt_deg"], 0.0],
                     "untilt",
                     task,
+                    vel=pour_vel,
+                    acc=pour_acc,
                 ),
             ),
         ]
@@ -85,29 +86,19 @@ class PourWaterTask(BaseTask):
                     (
                         "return_above_bottle",
                         lambda: motion.approach_pose(
-                            bottle,
-                            cfg["grasp_offset_z_mm"],
-                            "return_above_bottle",
-                            task,
+                            bottle, grasp_z, "return_above_bottle", task
                         ),
                     ),
                     (
                         "lower_bottle",
                         lambda: motion.move_relative_tool(
-                            [0.0, 0.0, -cfg["grasp_offset_z_mm"], 0.0, 0.0, 0.0],
+                            [0.0, 0.0, -grasp_z, 0.0, 0.0, 0.0],
                             "lower_bottle",
                             task,
                         ),
                     ),
                     ("open_gripper", motion.gripper.open),
-                    (
-                        "retract",
-                        lambda: motion.retreat_z(
-                            cfg["grasp_offset_z_mm"],
-                            "retract",
-                            task,
-                        ),
-                    ),
+                    ("retract", lambda: motion.retreat_z(grasp_z, "retract", task)),
                 ]
             )
         else:

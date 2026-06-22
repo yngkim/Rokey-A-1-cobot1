@@ -1,8 +1,10 @@
 import { useState } from 'react'
 import { runTask } from './api/client'
+import SafetyAlertModal from './components/SafetyAlertModal'
+import RunningDock from './components/RunningDock'
 import { useRobotApp } from './hooks/useRobotApp'
 
-function TaskButton({ task, disabled, onRun }) {
+function TaskButton({ task, disabled, hint, onRun }) {
   const [loading, setLoading] = useState(false)
 
   const handleClick = async () => {
@@ -17,9 +19,10 @@ function TaskButton({ task, disabled, onRun }) {
 
   return (
     <button
-      className={`task-btn ${loading ? 'loading' : ''}`}
+      className={`task-btn ${loading ? 'loading' : ''} ${disabled ? 'disabled' : ''}`}
       onClick={handleClick}
       disabled={disabled || loading}
+      title={hint}
     >
       <span className="task-icon">{task.icon}</span>
       <span className="task-label">{task.label}</span>
@@ -28,14 +31,46 @@ function TaskButton({ task, disabled, onRun }) {
   )
 }
 
+function connectionLabel(apiOnline, robotReady) {
+  if (!apiOnline) return { text: 'API 미연결', className: 'off' }
+  if (!robotReady) return { text: '로봇 대기', className: 'warn' }
+  return { text: '연결됨', className: 'on' }
+}
+
 export default function App() {
-  const { tasks, connected, busy, status, alert, toast, showToast, clearAlert } = useRobotApp()
+  const {
+    tasks,
+    apiOnline,
+    robotReady,
+    busy,
+    stopping,
+    activeTaskLabel,
+    status,
+    alert,
+    toast,
+    showToast,
+    refreshHealth,
+    handleStop,
+    clearAlert,
+  } = useRobotApp()
+
+  const conn = connectionLabel(apiOnline, robotReady)
+  const canRun = apiOnline && robotReady && !busy
+
+  const disabledHint = !apiOnline
+    ? 'care_web_api를 실행하세요 (포트 8080)'
+    : !robotReady
+      ? 'bringup 실행 및 SERVO ON 후 사용 가능'
+      : busy
+        ? '다른 작업 실행 중'
+        : ''
 
   const handleRun = async (taskId) => {
     try {
       const result = await runTask(taskId)
       if (result.success) {
         showToast(result.message || '작업을 시작했습니다')
+        refreshHealth()
       } else {
         showToast(result.message || '실행 실패', 'error')
       }
@@ -47,27 +82,32 @@ export default function App() {
   const groups = [...new Set(tasks.map((t) => t.group))]
 
   return (
-    <div className="phone-shell">
+    <div className={`phone-shell ${busy ? 'is-busy' : ''}`}>
       <div className="phone-notch" />
       <header className="app-header">
         <div>
           <h1>침상 케어 로봇</h1>
           <p className="subtitle">M0609 원격 제어</p>
         </div>
-        <div className={`conn-badge ${connected ? 'on' : 'off'}`}>
-          {connected ? '연결됨' : '미연결'}
-        </div>
+        <div className={`conn-badge ${conn.className}`}>{conn.text}</div>
       </header>
 
-      {alert && (
-        <div className="alert-banner" role="alert">
-          <strong>⚠️ 안전 경고</strong>
-          <p>{alert.message}</p>
-          <button onClick={clearAlert}>확인</button>
+      {!apiOnline && (
+        <div className="info-banner">
+          웹 API 서버가 꺼져 있습니다.
+          <code>ros2 run cobot1 care_web_api</code>
         </div>
       )}
 
-      <main className="app-main">
+      {apiOnline && !robotReady && (
+        <div className="info-banner warn">
+          로봇 bringup을 실행하고 팬던트에서 SERVO ON 하세요.
+        </div>
+      )}
+
+      {alert && <SafetyAlertModal alert={alert} onClose={clearAlert} />}
+
+      <main className={`app-main ${busy ? 'dimmed' : ''}`}>
         {groups.map((group) => (
           <section key={group} className="task-section">
             <h2>{group}</h2>
@@ -78,7 +118,8 @@ export default function App() {
                   <TaskButton
                     key={task.id}
                     task={task}
-                    disabled={!connected || busy}
+                    disabled={!canRun}
+                    hint={disabledHint}
                     onRun={handleRun}
                   />
                 ))}
@@ -88,15 +129,22 @@ export default function App() {
       </main>
 
       <footer className="status-bar">
-        {busy && <span className="status-busy">● 작업 실행 중...</span>}
-        {status && (
-          <span>
-            [{status.task}] {status.step} — {status.state}
-            {status.message ? `: ${status.message}` : ''}
+        {!busy && <span>버튼을 눌러 기능을 실행하세요</span>}
+        {busy && status && (
+          <span className="status-muted">
+            [{status.task}] {status.step}
           </span>
         )}
-        {!status && !busy && <span>버튼을 눌러 기능을 실행하세요</span>}
       </footer>
+
+      <RunningDock
+        busy={busy}
+        taskLabel={activeTaskLabel}
+        step={status?.step}
+        stepMessage={status?.message}
+        onStop={handleStop}
+        stopping={stopping}
+      />
 
       {toast && (
         <div className={`toast toast-${toast.level}`} key={toast.id}>

@@ -1,4 +1,4 @@
-"""임의 위치의 알약을 집어 다른 위치에 놓기."""
+"""알약 서랍에서 꺼내 지정 위치로 옮기기."""
 
 from __future__ import annotations
 
@@ -11,9 +11,10 @@ class PickPlacePillTask(BaseTask):
     def _execute(self) -> None:
         cfg = self._cfg
         motion = self._motion
-        pick_pose = cfg["pick_pose"]
+        drawer = cfg["drawer_pose"]
         place_pose = cfg["place_pose"]
-        approach_h = self._scenarios["motion"].get("approach_height_mm", 80)
+        approach_z = cfg["drawer_approach_z_mm"]
+        pick_depth = cfg["pick_depth_mm"]
         task = self.name
 
         motion.gripper.open()
@@ -21,38 +22,44 @@ class PickPlacePillTask(BaseTask):
         steps = [
             ("home", lambda: motion.go_home(task)),
             (
-                "approach_pick",
-                lambda: motion.approach_pose(pick_pose, approach_h, "approach_pick", task),
+                "approach_drawer",
+                lambda: motion.approach_pose(
+                    drawer, approach_z, "approach_drawer", task
+                ),
             ),
             (
-                "descend_pick",
+                "reach_into_drawer",
                 lambda: motion.move_relative_tool(
-                    [0.0, 0.0, -approach_h + cfg["pick_depth_mm"], 0.0, 0.0, 0.0],
-                    "descend_pick",
+                    [0.0, 0.0, -(approach_z - pick_depth), 0.0, 0.0, 0.0],
+                    "reach_into_drawer",
                     task,
                 ),
             ),
             ("grip_pill", motion.gripper.close),
-            ("lift_pick", lambda: motion.retreat_z(approach_h, "lift_pick", task)),
+            (
+                "pull_out_drawer",
+                lambda: motion.retreat_z(
+                    approach_z + cfg.get("drawer_pull_back_mm", 10),
+                    "pull_out_drawer",
+                    task,
+                ),
+            ),
             (
                 "approach_place",
                 lambda: motion.approach_pose(
-                    place_pose,
-                    approach_h,
-                    "approach_place",
-                    task,
+                    place_pose, approach_z, "approach_place", task
                 ),
             ),
             (
                 "descend_place",
                 lambda: motion.move_relative_tool(
-                    [0.0, 0.0, -approach_h + cfg["place_depth_mm"], 0.0, 0.0, 0.0],
+                    [0.0, 0.0, -(approach_z - cfg["place_depth_mm"]), 0.0, 0.0, 0.0],
                     "descend_place",
                     task,
                 ),
             ),
             ("release_pill", motion.gripper.open),
-            ("lift_place", lambda: motion.retreat_z(approach_h, "lift_place", task)),
+            ("lift_place", lambda: motion.retreat_z(approach_z, "lift_place", task)),
             ("home_finish", lambda: motion.go_home(task)),
         ]
         motion.run_sequence(task, steps)

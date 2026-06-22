@@ -8,9 +8,12 @@ import threading
 import time
 from typing import TYPE_CHECKING, Callable
 
-from std_msgs.msg import String
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import SingleThreadedExecutor
+from std_msgs.msg import Float64MultiArray, String
 
 from cobot1.motion.exceptions import SafetyViolation
+from cobot1.robot_config import ROBOT_ID
 
 if TYPE_CHECKING:
     from rclpy.node import Node
@@ -42,7 +45,11 @@ DEFAULT_MESSAGES = {
 
 
 class SafetyGuard:
-    """동작 중 외력·로봇 상태를 감시하고 비상 중단합니다."""
+    """동작 중 외력·로봇 상태를 감시하고 비상 중단합니다.
+
+    DSR_ROBOT2는 동일 노드에서 spin_until_future_complete를 중복 호출할 수 없으므로,
+    외력 감시는 별도 노드의 토픽 구독으로 처리하고 로봇 상태는 메인 스레드에서만 조회합니다.
+    """
 
     def __init__(self, node: Node, cfg: dict, publish_status: Callable[..., None]):
         self._node = node
@@ -50,15 +57,26 @@ class SafetyGuard:
         self._publish_status = publish_status
         self._enabled = bool(cfg.get("enabled", True))
         self._interval = float(cfg.get("monitor_interval_sec", 0.1))
-        self._torque_limit = float(cfg.get("external_torque_max_norm", 8.0))
+        self._torque_limit = float(cfg.get("external_torque_max_norm", 30.0))
         self._messages = {**DEFAULT_MESSAGES, **cfg.get("messages", {})}
         self._abort = threading.Event()
         self._violation: SafetyViolation | None = None
         self._thread: threading.Thread | None = None
         self._task = ""
-        self._move_stop_client = None
         self._alert_pub = node.create_publisher(String, "cobot1/safety_alert", 10)
-        self._import_api()
+
+        self._latest_tool_force: list[float] | None = None
+        self._force_lock = threading.Lock()
+        self._monitor_node = None
+        self._executor: SingleThreadedExecutor | None = None
+        self._spin_thread: threading.Thread | None = None
+        self._move_stop_client = None
+        self._move_stop_request = None
+        self._get_robot_state = None
+        self._get_last_alarm = None
+
+        if self._enabled:
+            self._setup_monitor_node()
 
     @property
     def enabled(self) -> bool:
@@ -68,19 +86,47 @@ class SafetyGuard:
     def is_aborted(self) -> bool:
         return self._abort.is_set()
 
-    def _import_api(self) -> None:
+    def _setup_monitor_node(self) -> None:
+        import rclpy
+        from dsr_msgs2.srv import MoveStop
+
         from cobot1.motion.dsr_imports import import_dsr_api
 
         api = import_dsr_api()
-        self._get_external_torque = api["get_external_torque"]
         self._get_robot_state = api["get_robot_state"]
         self._get_last_alarm = api["get_last_alarm"]
-        self._get_tool_force = api["get_tool_force"]
 
-        from dsr_msgs2.srv import MoveStop
-
-        self._move_stop_client = self._node.create_client(MoveStop, "motion/move_stop")
+        self._monitor_node = rclpy.create_node(
+            "cobot1_safety_monitor",
+            namespace=ROBOT_ID,
+        )
+        group = MutuallyExclusiveCallbackGroup()
+        self._monitor_node.create_subscription(
+            Float64MultiArray,
+            "msg/tool_force",
+            self._on_tool_force,
+            10,
+            callback_group=group,
+        )
+        self._move_stop_client = self._monitor_node.create_client(
+            MoveStop,
+            "motion/move_stop",
+            callback_group=group,
+        )
         self._move_stop_request = MoveStop.Request()
+
+        self._executor = SingleThreadedExecutor()
+        self._executor.add_node(self._monitor_node)
+        self._spin_thread = threading.Thread(
+            target=self._executor.spin,
+            name="cobot1_safety_spin",
+            daemon=True,
+        )
+        self._spin_thread.start()
+
+    def _on_tool_force(self, msg: Float64MultiArray) -> None:
+        with self._force_lock:
+            self._latest_tool_force = list(msg.data)
 
     def start(self, task: str) -> None:
         if not self._enabled:
@@ -88,6 +134,7 @@ class SafetyGuard:
         self._task = task
         self._abort.clear()
         self._violation = None
+
         self._thread = threading.Thread(
             target=self._monitor_loop,
             name=f"safety_monitor_{task}",
@@ -97,10 +144,22 @@ class SafetyGuard:
         self._publish_status(task, "safety_monitor", "running", "안전 감시 시작")
 
     def stop(self) -> None:
+        self._abort.set()
         if self._thread and self._thread.is_alive():
-            self._abort.set()
             self._thread.join(timeout=2.0)
         self._thread = None
+
+    def shutdown(self) -> None:
+        self.stop()
+        if self._executor is not None:
+            self._executor.shutdown()
+            self._executor = None
+        if self._spin_thread and self._spin_thread.is_alive():
+            self._spin_thread.join(timeout=2.0)
+        self._spin_thread = None
+        if self._monitor_node is not None:
+            self._monitor_node.destroy_node()
+            self._monitor_node = None
 
     def check_or_raise(self) -> None:
         if self._violation is not None:
@@ -111,12 +170,13 @@ class SafetyGuard:
                 code="SAFETY_ABORT",
                 user_message=self._messages["unknown_error"],
             )
+        if self._enabled:
+            self._check_robot_state()
 
     def _monitor_loop(self) -> None:
         while not self._abort.is_set():
             try:
-                self._check_external_torque()
-                self._check_robot_state()
+                self._check_external_torque_from_topic()
             except SafetyViolation as exc:
                 self._trigger_abort(exc)
                 break
@@ -124,9 +184,10 @@ class SafetyGuard:
                 self._node.get_logger().warn(f"안전 감시 오류(계속): {exc}")
             time.sleep(self._interval)
 
-    def _check_external_torque(self) -> None:
-        torque = self._get_external_torque()
-        if torque == -1 or not isinstance(torque, (list, tuple)):
+    def _check_external_torque_from_topic(self) -> None:
+        with self._force_lock:
+            torque = self._latest_tool_force
+        if not torque or len(torque) < 6:
             return
         norm = math.sqrt(sum(float(v) ** 2 for v in torque[:6]))
         if norm > self._torque_limit:
@@ -138,6 +199,8 @@ class SafetyGuard:
             )
 
     def _check_robot_state(self) -> None:
+        if self._get_robot_state is None:
+            return
         state = self._get_robot_state()
         if state == -1:
             return
@@ -166,10 +229,13 @@ class SafetyGuard:
         )
         self._request_move_stop()
 
+    def request_move_stop(self) -> None:
+        self._request_move_stop()
+
     def _request_move_stop(self) -> None:
         if self._move_stop_client is None:
             return
-        if not self._move_stop_client.wait_for_service(timeout_sec=0.5):
+        if not self._move_stop_client.service_is_ready():
             self._node.get_logger().warn("motion/move_stop 서비스 없음")
             return
         future = self._move_stop_client.call_async(self._move_stop_request)
@@ -178,12 +244,6 @@ class SafetyGuard:
             time.sleep(0.05)
 
     def _publish_alert(self, violation: SafetyViolation) -> None:
-        alarm = None
-        try:
-            alarm = self._get_last_alarm()
-        except Exception:
-            pass
-
         payload = {
             "level": "error",
             "code": violation.code,
@@ -191,7 +251,7 @@ class SafetyGuard:
             "technical": str(violation),
             "task": self._task,
             "detail": violation.detail,
-            "last_alarm": str(alarm) if alarm is not None else "",
+            "last_alarm": "",
             "timestamp": time.time(),
         }
         msg = String()
@@ -199,6 +259,8 @@ class SafetyGuard:
         self._alert_pub.publish(msg)
 
     def get_last_alarm_text(self) -> str:
+        if self._get_last_alarm is None:
+            return ""
         try:
             alarm = self._get_last_alarm()
             return str(alarm) if alarm not in (-1, None) else ""

@@ -1,4 +1,4 @@
-"""ROS2 care_server ↔ 웹앱 HTTP/WebSocket 브릿지."""
+"""ROS2 태스크 ↔ 웹앱 HTTP/WebSocket 브릿지 (care_server 없이 직접 실행)."""
 
 from __future__ import annotations
 
@@ -11,19 +11,20 @@ import rclpy
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_msgs.msg import String
-from std_srvs.srv import Trigger
 
+from cobot1.bridge.task_session import WebTaskSession
 from cobot1.robot_config import ROBOT_ID
+from cobot1.task_runner import TASK_REGISTRY, _ensure_registry
 
 TASK_CATALOG: list[dict[str, str]] = [
     {"id": "open_bottle", "label": "페트병 뚜껑 열기", "icon": "🍼", "group": "음료"},
-    {"id": "insert_straw", "label": "빨대 꽂기", "icon": "🥤", "group": "음료"},
     {"id": "pour_water", "label": "물 따르기", "icon": "💧", "group": "음료"},
-    {"id": "pick_place_pill", "label": "알약 옮기기", "icon": "💊", "group": "복약"},
-    {"id": "pull_place_tissue", "label": "휴지 건네기", "icon": "🧻", "group": "생활"},
-    {"id": "turn_off_switch", "label": "스위치 끄기", "icon": "🔌", "group": "생활"},
-    {"id": "go_home", "label": "홈 위치", "icon": "🏠", "group": "제어"},
+    {"id": "pick_place_pill", "label": "알약 서랍에서 꺼내기", "icon": "💊", "group": "복약"},
+    {"id": "place_on_charger", "label": "충전기에 놓기", "icon": "📲", "group": "스마트폰"},
+    {"id": "pick_from_charger", "label": "충전기에서 가져오기", "icon": "🔋", "group": "스마트폰"},
 ]
+
+TASK_IDS = {task["id"] for task in TASK_CATALOG}
 
 
 class RosBridge(Node):
@@ -32,18 +33,30 @@ class RosBridge(Node):
         self._loop = loop
         self._ws_clients: set[Any] = set()
         self._busy = False
+        self._robot_ready = False
+        self._current_task_id = ""
+        self._task_lock = threading.Lock()
+        self._task_session = WebTaskSession()
         self._last_status: dict[str, Any] = {}
         self._last_alert: dict[str, Any] | None = None
 
         self.create_subscription(String, "cobot1/status", self._on_status, 10)
         self.create_subscription(String, "cobot1/safety_alert", self._on_alert, 10)
 
-        self._trigger_clients: dict[str, Any] = {}
-        for task in TASK_CATALOG:
-            name = task["id"]
-            self._trigger_clients[name] = self.create_client(Trigger, f"cobot1/{name}")
+        from dsr_msgs2.srv import SetRobotMode
 
-        self.get_logger().info("care_web_bridge 준비 완료 (namespace=%s)" % ROBOT_ID)
+        self._robot_mode_client = self.create_client(
+            SetRobotMode, "system/set_robot_mode"
+        )
+        self.refresh_robot_ready()
+        self.get_logger().info(
+            "care_web_bridge 준비 (namespace=%s, robot_ready=%s)"
+            % (ROBOT_ID, self._robot_ready)
+        )
+
+    def refresh_robot_ready(self) -> bool:
+        self._robot_ready = self._robot_mode_client.wait_for_service(timeout_sec=0.5)
+        return self._robot_ready
 
     def _on_status(self, msg: String) -> None:
         try:
@@ -51,6 +64,14 @@ class RosBridge(Node):
         except json.JSONDecodeError:
             payload = {"message": msg.data}
         self._last_status = payload
+        state = payload.get("state", "")
+        step = payload.get("step", "")
+        if payload.get("task"):
+            with self._task_lock:
+                self._current_task_id = payload["task"]
+        if state == "running":
+            with self._task_lock:
+                self._busy = True
         self._broadcast({"type": "status", "data": payload})
 
     def _on_alert(self, msg: String) -> None:
@@ -97,43 +118,86 @@ class RosBridge(Node):
     def unregister_ws(self, ws) -> None:
         self._ws_clients.discard(ws)
 
-    def call_task(self, task_id: str, timeout_sec: float = 300.0) -> dict[str, Any]:
-        if self._busy:
-            return {
-                "success": False,
-                "message": "다른 작업이 실행 중입니다. 완료 후 다시 시도해 주세요.",
-                "code": "BUSY",
-            }
-
-        client = self._trigger_clients.get(task_id)
-        if client is None:
-            return {"success": False, "message": f"알 수 없는 작업: {task_id}", "code": "NOT_FOUND"}
-
-        if not client.wait_for_service(timeout_sec=2.0):
-            return {
-                "success": False,
-                "message": "care_server에 연결되지 않았습니다. ros2 run cobot1 care_server 를 실행하세요.",
-                "code": "NO_SERVER",
-            }
-
-        self._busy = True
+    def _execute_task(self, task_id: str) -> None:
         try:
-            future = client.call_async(Trigger.Request())
-            rclpy.spin_until_future_complete(self, future, timeout_sec=timeout_sec)
-            if not future.done():
-                return {"success": False, "message": "작업 시간 초과", "code": "TIMEOUT"}
-            result = future.result()
-            if result is None:
-                return {"success": False, "message": "서비스 응답 없음", "code": "NO_RESPONSE"}
-            return {
-                "success": bool(result.success),
-                "message": result.message or ("완료" if result.success else "실패"),
-                "code": "OK" if result.success else "TASK_FAILED",
-            }
+            self._task_session.run(task_id)
+            self.get_logger().info("[%s] finished" % task_id)
         except Exception as exc:
-            return {"success": False, "message": str(exc), "code": "ERROR"}
-        finally:
-            self._busy = False
+            self.get_logger().error(f"태스크 {task_id} 실패: {exc}")
+
+    def shutdown_session(self) -> None:
+        self._task_session.cleanup()
+
+    def stop_task(self) -> dict[str, Any]:
+        with self._task_lock:
+            if not self._busy:
+                return {
+                    "success": False,
+                    "message": "실행 중인 작업이 없습니다.",
+                    "code": "NOT_RUNNING",
+                }
+        stopped = self._task_session.request_stop()
+        return {
+            "success": stopped,
+            "message": "정지 요청을 보냈습니다. 로봇이 안전하게 멈춥니다.",
+            "code": "STOPPING",
+        }
+
+    def start_task(self, task_id: str) -> dict[str, Any]:
+        if task_id not in TASK_IDS:
+            return {
+                "success": False,
+                "message": f"알 수 없는 작업: {task_id}",
+                "code": "NOT_FOUND",
+            }
+
+        with self._task_lock:
+            if self._busy:
+                return {
+                    "success": False,
+                    "message": "다른 작업이 실행 중입니다. 완료 후 다시 시도해 주세요.",
+                    "code": "BUSY",
+                }
+            if not self.refresh_robot_ready():
+                return {
+                    "success": False,
+                    "message": (
+                        "로봇 제어 서비스에 연결되지 않았습니다. "
+                        "bringup을 실행하고 SERVO ON 상태인지 확인하세요."
+                    ),
+                    "code": "NO_ROBOT",
+                }
+            _ensure_registry()
+            if task_id not in TASK_REGISTRY:
+                return {
+                    "success": False,
+                    "message": f"등록되지 않은 작업: {task_id}",
+                    "code": "NOT_FOUND",
+                }
+            self._busy = True
+            self._current_task_id = task_id
+
+        label = next((t["label"] for t in TASK_CATALOG if t["id"] == task_id), task_id)
+
+        def _worker():
+            try:
+                self._execute_task(task_id)
+            finally:
+                with self._task_lock:
+                    self._busy = False
+                    self._current_task_id = ""
+
+        threading.Thread(
+            target=_worker,
+            name=f"cobot1_web_{task_id}",
+            daemon=True,
+        ).start()
+
+        return {
+            "success": True,
+            "message": f"{label} 실행을 시작했습니다 (ros2 run cobot1 {task_id})",
+            "code": "STARTED",
+        }
 
 
 _ros_node: RosBridge | None = None
@@ -166,6 +230,26 @@ def get_ros_node() -> RosBridge:
     return _ros_node
 
 
+def _web_dist_dir():
+    """설치(share) 또는 개발(소스) 경로에서 web/dist 를 찾습니다."""
+    from pathlib import Path
+
+    try:
+        from ament_index_python.packages import get_package_share_directory
+
+        share = Path(get_package_share_directory("cobot1"))
+        installed = share / "web" / "dist"
+        if installed.is_dir():
+            return installed
+    except Exception:
+        pass
+
+    source = Path(__file__).resolve().parents[3] / "web" / "dist"
+    if source.is_dir():
+        return source
+    return Path()
+
+
 def create_app():
     try:
         from contextlib import asynccontextmanager
@@ -187,6 +271,9 @@ def create_app():
         loop = asyncio.get_running_loop()
         bridge_holder["bridge"] = start_ros(loop)
         yield
+        bridge = bridge_holder.get("bridge")
+        if bridge is not None:
+            bridge.shutdown_session()
         if _ros_executor is not None:
             _ros_executor.shutdown()
         if rclpy.ok():
@@ -204,10 +291,28 @@ def create_app():
     @app.get("/api/health")
     def health():
         bridge = bridge_holder.get("bridge")
+        if bridge is None:
+            return {
+                "ok": False,
+                "api_ok": False,
+                "robot_ready": False,
+                "busy": False,
+                "robot_namespace": ROBOT_ID,
+            }
+        robot_ready = bridge.refresh_robot_ready()
+        label = next(
+            (t["label"] for t in TASK_CATALOG if t["id"] == bridge._current_task_id),
+            bridge._current_task_id,
+        )
         return {
-            "ok": bridge is not None,
+            "ok": True,
+            "api_ok": True,
+            "robot_ready": robot_ready,
+            "busy": bridge._busy,
+            "current_task": bridge._current_task_id,
+            "current_task_label": label,
+            "current_step": bridge._last_status.get("step", ""),
             "robot_namespace": ROBOT_ID,
-            "busy": bridge._busy if bridge else False,
         }
 
     @app.get("/api/tasks")
@@ -219,10 +324,17 @@ def create_app():
         bridge = bridge_holder.get("bridge")
         if bridge is None:
             raise HTTPException(status_code=503, detail="ROS bridge 초기화 중")
-        result = bridge.call_task(task_id)
+        result = bridge.start_task(task_id)
         if result.get("code") == "NOT_FOUND":
             raise HTTPException(status_code=404, detail=result["message"])
         return result
+
+    @app.post("/api/stop")
+    def stop_task():
+        bridge = bridge_holder.get("bridge")
+        if bridge is None:
+            raise HTTPException(status_code=503, detail="ROS bridge 초기화 중")
+        return bridge.stop_task()
 
     @app.websocket("/ws")
     async def websocket_endpoint(ws: WebSocket):
@@ -238,7 +350,7 @@ def create_app():
         except WebSocketDisconnect:
             bridge.unregister_ws(ws)
 
-    dist = Path(__file__).resolve().parents[2] / "web" / "dist"
+    dist = _web_dist_dir()
     if dist.is_dir():
         app.mount("/", StaticFiles(directory=str(dist), html=True), name="static")
 

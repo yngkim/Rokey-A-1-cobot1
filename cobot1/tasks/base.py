@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from cobot1.motion.exceptions import CobotError, SafetyViolation
+from cobot1.motion.exceptions import CobotError, SafetyViolation, TaskCancelled
 from cobot1.motion.primitives import MotionContext, RobotMotion
 
 
@@ -31,6 +31,14 @@ class BaseTask:
         try:
             self._execute()
         except SafetyViolation as exc:
+            return TaskResult(
+                False,
+                self.name,
+                str(exc),
+                code=exc.code,
+                user_message=exc.user_message,
+            )
+        except TaskCancelled as exc:
             return TaskResult(
                 False,
                 self.name,

@@ -1,17 +1,7 @@
-"""프론트엔드 연동용 케어 로봇 서버 노드.
+"""프론트엔드 연동용 케어 로봇 서버 (4대 핵심 기능).
 
-ROS2 서비스 (std_srvs/Trigger):
-  /dsr01/cobot1/open_bottle
-  /dsr01/cobot1/pour_water
-  /dsr01/cobot1/pick_place_pill
-  /dsr01/cobot1/insert_straw
-  /dsr01/cobot1/turn_off_switch
-  /dsr01/cobot1/pull_place_tissue
-  /dsr01/cobot1/go_home
-
-상태 토픽 (std_msgs/String, JSON):
-  /dsr01/cobot1/status
-  /dsr01/cobot1/safety_alert
+ROS2 서비스: /dsr01/cobot1/{task_name}
+상태 토픽: /dsr01/cobot1/status, /dsr01/cobot1/safety_alert
 """
 
 from __future__ import annotations
@@ -24,10 +14,10 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_srvs.srv import Trigger
 
-from cobot1.robot_config import ROBOT_ID, ROBOT_MODEL
+from cobot1.robot_config import ROBOT_ID
 from cobot1.config_loader import load_scenarios
 from cobot1.motion.primitives import MotionContext, RobotMotion
-from cobot1.robot_init import prepare_autonomous_mode
+from cobot1.robot_init import destroy_dsr_node, prepare_autonomous_mode, setup
 from cobot1.task_runner import TASK_REGISTRY, _ensure_registry
 
 
@@ -44,17 +34,13 @@ class CareRobotServer(Node):
         self._config_path = config_path or None
         self._scenarios = load_scenarios(self._config_path)
 
-        DR_init_node = self
-        import DR_init
+        from cobot1.robot_init import setup
 
-        DR_init.__dsr__id = ROBOT_ID
-        DR_init.__dsr__model = ROBOT_MODEL
-        DR_init.__dsr__node = DR_init_node
-
+        self._dsr_node = setup("care_dsr_client")
         prepare_autonomous_mode()
         self._motion = RobotMotion(
             MotionContext(
-                node=self,
+                node=self._dsr_node,
                 motion_cfg=self._scenarios["motion"],
                 gripper_cfg=self._scenarios["gripper"],
                 safety_cfg=self._scenarios.get("safety", {}),
@@ -69,32 +55,12 @@ class CareRobotServer(Node):
                 lambda req, res, name=task_name: self._handle_task(req, res, name),
                 callback_group=group,
             )
-        self.create_service(
-            Trigger,
-            "cobot1/go_home",
-            self._handle_go_home,
-            callback_group=group,
-        )
         self.get_logger().info("CareRobotServer 준비 완료")
 
-    def _handle_go_home(self, request, response):
-        del request
-        with self._lock:
-            if self._busy:
-                response.success = False
-                response.message = "다른 작업 실행 중"
-                return response
-            self._busy = True
-        try:
-            self._motion.go_home("manual")
-            response.success = True
-            response.message = "홈 위치 이동 완료"
-        except Exception as exc:
-            response.success = False
-            response.message = str(exc)
-        finally:
-            self._busy = False
-        return response
+    def shutdown(self) -> None:
+        if hasattr(self, "_motion"):
+            self._motion.shutdown()
+        destroy_dsr_node()
 
     def _handle_task(self, request, response, task_name: str):
         del request
@@ -130,6 +96,7 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        node.shutdown()
         node.destroy_node()
         rclpy.shutdown()
 

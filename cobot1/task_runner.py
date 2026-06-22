@@ -6,7 +6,7 @@ from typing import Any, Type
 
 from cobot1.config_loader import load_scenarios
 from cobot1.motion.primitives import MotionContext, RobotMotion
-from cobot1.robot_init import prepare_autonomous_mode, setup
+from cobot1.robot_init import destroy_dsr_node, prepare_autonomous_mode, setup
 from cobot1.tasks.base import BaseTask, TaskResult
 
 
@@ -21,20 +21,18 @@ def register_task(task_cls: Type[BaseTask]) -> Type[BaseTask]:
 def _ensure_registry() -> None:
     if TASK_REGISTRY:
         return
-    from cobot1.tasks.insert_straw import InsertStrawTask
     from cobot1.tasks.open_bottle import OpenBottleTask
+    from cobot1.tasks.pick_from_charger import PickFromChargerTask
     from cobot1.tasks.pick_place_pill import PickPlacePillTask
-    from cobot1.tasks.pull_place_tissue import PullPlaceTissueTask
+    from cobot1.tasks.place_on_charger import PlaceOnChargerTask
     from cobot1.tasks.pour_water import PourWaterTask
-    from cobot1.tasks.turn_off_switch import TurnOffSwitchTask
 
     for task_cls in (
         OpenBottleTask,
         PourWaterTask,
         PickPlacePillTask,
-        InsertStrawTask,
-        TurnOffSwitchTask,
-        PullPlaceTissueTask,
+        PlaceOnChargerTask,
+        PickFromChargerTask,
     ):
         register_task(task_cls)
 
@@ -52,15 +50,20 @@ def run_task(
 
     scenarios = load_scenarios(config_path, overrides)
     node = setup(node_name or f"cobot1_{task_name}", args=args)
-    prepare_autonomous_mode()
-
-    motion = RobotMotion(
-        MotionContext(
-            node=node,
-            motion_cfg=scenarios["motion"],
-            gripper_cfg=scenarios["gripper"],
-            safety_cfg=scenarios.get("safety", {}),
+    motion = None
+    try:
+        prepare_autonomous_mode()
+        motion = RobotMotion(
+            MotionContext(
+                node=node,
+                motion_cfg=scenarios["motion"],
+                gripper_cfg=scenarios["gripper"],
+                safety_cfg=scenarios.get("safety", {}),
+            )
         )
-    )
-    task = TASK_REGISTRY[task_name](scenarios, motion)
-    return task.run()
+        task = TASK_REGISTRY[task_name](scenarios, motion)
+        return task.run()
+    finally:
+        if motion is not None:
+            motion.shutdown()
+        destroy_dsr_node()

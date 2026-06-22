@@ -4,16 +4,25 @@ from glob import glob
 
 package_name = 'cobot1'
 
+data_files = [
+    ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
+    ('share/' + package_name, ['package.xml']),
+    (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
+]
+
+for root, _dirs, files in os.walk('web/dist'):
+    if files:
+        rel = os.path.relpath(root, 'web/dist')
+        dest = os.path.join('share', package_name, 'web', 'dist')
+        if rel != '.':
+            dest = os.path.join(dest, rel)
+        data_files.append((dest, [os.path.join(root, f) for f in files]))
+
 setup(
     name=package_name,
     version='0.1.0',
     packages=find_packages(exclude=['test']),
-    data_files=[
-        ('share/ament_index/resource_index/packages',
-            ['resource/' + package_name]),
-        ('share/' + package_name, ['package.xml']),
-        (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
-    ],
+    data_files=data_files,
     install_requires=['setuptools', 'PyYAML'],
     zip_safe=True,
     maintainer='rokey',
@@ -27,22 +36,13 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'move = cobot1.move:main',
-            'move2 = cobot1.move2:main',
             'open_bottle = cobot1.open_bottle:main',
             'pour_water = cobot1.pour_water:main',
             'pick_place_pill = cobot1.pick_place_pill:main',
-            'insert_straw = cobot1.insert_straw:main',
-            'turn_off_switch = cobot1.turn_off_switch:main',
-            'pull_place_tissue = cobot1.pull_place_tissue:main',
+            'place_on_charger = cobot1.place_on_charger:main',
+            'pick_from_charger = cobot1.pick_from_charger:main',
             'care_server = cobot1.nodes.care_server:main',
             'care_web_api = cobot1.bridge.api_server:main',
-            'ex01_joint_motion = cobot1.ex01_joint_motion:main',
-            'ex02_linear_motion = cobot1.ex02_linear_motion:main',
-            'ex03_circle_motion = cobot1.ex03_circle_motion:main',
-            'ex04_transform_kinematics = cobot1.ex04_transform_kinematics:main',
-            'ex05_motion_settings = cobot1.ex05_motion_settings:main',
-            'ex06_robot_status = cobot1.ex06_robot_status:main',
         ],
     },
 )

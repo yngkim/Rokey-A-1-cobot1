@@ -1,0 +1,63 @@
+# 침상 케어 로봇 시나리오 설정 (단위: mm, deg)
+# 프론트엔드 또는 ros2 param으로 경로/값 오버라이드 가능
+
+motion:
+  home_joint: [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]
+  joint_vel: 30
+  joint_acc: 30
+  task_vel: [80, 40]
+  task_acc: [150, 80]
+  approach_height_mm: 80
+  retreat_height_mm: 100
+  retry_count: 1
+
+gripper:
+  simulated: true
+  settle_time_sec: 0.5
+
+open_bottle:
+  bottle_pose: [420.0, -180.0, 340.0, 180.0, 0.0, 90.0]
+  cap_approach_z_mm: 60
+  cap_grasp_z_mm: 15
+  twist_angle_deg: 180.0
+  twist_steps: 6
+  twist_down_mm: 5
+
+pour_water:
+  bottle_pose: [400.0, -200.0, 360.0, 180.0, 0.0, 90.0]
+  cup_pose: [400.0, -80.0, 300.0, 180.0, 0.0, 90.0]
+  grasp_offset_z_mm: 40
+  pour_height_above_cup_mm: 120
+  pour_tilt_deg: 55.0
+  pour_duration_sec: 2.5
+  return_bottle: true
+
+pick_place_pill:
+  pick_pose: [380.0, -150.0, 310.0, 180.0, 0.0, 90.0]
+  place_pose: [450.0, -120.0, 310.0, 180.0, 0.0, 90.0]
+  pick_depth_mm: 8
+  place_depth_mm: 8
+
+insert_straw:
+  bottle_pose: [420.0, -180.0, 340.0, 180.0, 0.0, 90.0]
+  straw_pick_pose: [480.0, -220.0, 330.0, 180.0, 0.0, 90.0]
+  pierce_approach_z_mm: 50
+  pierce_depth_mm: 25
+  pierce_steps: 3
+  insert_depth_mm: 35
+  straw_grasp_depth_mm: 10
+  insert_hold_sec: 0.8
+
+turn_off_switch:
+  switch_pose: [360.0, -250.0, 380.0, 180.0, 0.0, 90.0]
+  approach_z_mm: 70
+  press_depth_mm: 12
+  press_stroke_mm: 18
+  press_hold_sec: 0.5
+
+pull_place_tissue:
+  tissue_box_pose: [320.0, -280.0, 350.0, 180.0, 0.0, 90.0]
+  place_pose: [500.0, -100.0, 300.0, 180.0, 0.0, 90.0]
+  pick_depth_mm: 12
+  pull_distance_mm: 80
+  place_depth_mm: 10

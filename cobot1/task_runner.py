@@ -59,6 +59,7 @@ def run_task(
             node=node,
             motion_cfg=scenarios["motion"],
             gripper_cfg=scenarios["gripper"],
+            safety_cfg=scenarios.get("safety", {}),
         )
     )
     task = TASK_REGISTRY[task_name](scenarios, motion)

@@ -10,7 +10,8 @@ ROS2 서비스 (std_srvs/Trigger):
   /dsr01/cobot1/go_home
 
 상태 토픽 (std_msgs/String, JSON):
-  /cobot1/status
+  /dsr01/cobot1/status
+  /dsr01/cobot1/safety_alert
 """
 
 from __future__ import annotations
@@ -56,6 +57,7 @@ class CareRobotServer(Node):
                 node=self,
                 motion_cfg=self._scenarios["motion"],
                 gripper_cfg=self._scenarios["gripper"],
+                safety_cfg=self._scenarios.get("safety", {}),
             )
         )
 
@@ -109,7 +111,7 @@ class CareRobotServer(Node):
             task = task_cls(self._scenarios, self._motion)
             result = task.run()
             response.success = result.success
-            response.message = result.message
+            response.message = result.user_message or result.message
         except Exception as exc:
             response.success = False
             response.message = str(exc)

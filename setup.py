@@ -36,6 +36,7 @@ setup(
             'turn_off_switch = cobot1.turn_off_switch:main',
             'pull_place_tissue = cobot1.pull_place_tissue:main',
             'care_server = cobot1.nodes.care_server:main',
+            'care_web_api = cobot1.bridge.api_server:main',
             'ex01_joint_motion = cobot1.ex01_joint_motion:main',
             'ex02_linear_motion = cobot1.ex02_linear_motion:main',
             'ex03_circle_motion = cobot1.ex03_circle_motion:main',

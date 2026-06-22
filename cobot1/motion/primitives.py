@@ -1,4 +1,4 @@
-"""재시도·안전 복귀가 포함된 공통 모션 프리미티브."""
+"""재시도·안전 복귀·외력 감시가 포함된 공통 모션 프리미티브."""
 
 from __future__ import annotations
 
@@ -10,11 +10,9 @@ from typing import Callable, Iterable, Sequence
 from rclpy.node import Node
 from std_msgs.msg import String
 
+from cobot1.motion.exceptions import CobotError, MotionError, SafetyViolation
 from cobot1.motion.gripper import Gripper
-
-
-class MotionError(RuntimeError):
-    pass
+from cobot1.motion.safety import SafetyGuard
 
 
 @dataclass
@@ -22,6 +20,7 @@ class MotionContext:
     node: Node
     motion_cfg: dict
     gripper_cfg: dict
+    safety_cfg: dict | None = None
     status_topic: str = "cobot1/status"
 
 
@@ -33,11 +32,17 @@ class RobotMotion:
         self._retry = int(self._cfg.get("retry_count", 1))
         self._status_pub = self._node.create_publisher(String, ctx.status_topic, 10)
         self._gripper = Gripper(self._node, ctx.gripper_cfg)
+        safety_cfg = ctx.safety_cfg or {}
+        self._safety = SafetyGuard(self._node, safety_cfg, self.publish_status)
         self._import_motion_api()
 
     @property
     def gripper(self) -> Gripper:
         return self._gripper
+
+    @property
+    def safety(self) -> SafetyGuard:
+        return self._safety
 
     def _import_motion_api(self) -> None:
         from cobot1.motion.dsr_imports import import_dsr_api
@@ -53,6 +58,7 @@ class RobotMotion:
         self.posj = api["posj"]
         self.posx = api["posx"]
         self.trans = api["trans"]
+        self._get_last_alarm = api["get_last_alarm"]
 
     def publish_status(
         self,
@@ -77,21 +83,34 @@ class RobotMotion:
         self._node.get_logger().info(f"[{task}] {step} ({state}) {message}")
 
     def _run_with_retry(self, label: str, action: Callable[[], None]) -> None:
+        self._safety.check_or_raise()
         last_error: Exception | None = None
         for attempt in range(self._retry + 1):
             try:
+                self._safety.check_or_raise()
                 action()
                 self.mwait(0)
+                self._safety.check_or_raise()
                 if self.check_motion() != 0:
-                    raise MotionError(f"{label}: 모션 완료 확인 실패")
+                    raise MotionError(
+                        f"{label}: 모션 완료 확인 실패",
+                        code="MOTION_INCOMPLETE",
+                        user_message="동작이 완료되지 않았습니다. 로봇 상태를 확인해 주세요.",
+                    )
                 return
+            except SafetyViolation:
+                raise
             except Exception as exc:
                 last_error = exc
                 self._node.get_logger().warn(
                     f"{label} 실패 (시도 {attempt + 1}/{self._retry + 1}): {exc}"
                 )
                 time.sleep(0.3)
-        raise MotionError(f"{label} 최종 실패: {last_error}")
+        raise MotionError(
+            f"{label} 최종 실패: {last_error}",
+            code="MOTION_FAILED",
+            user_message="반복 시도 후에도 동작에 실패했습니다.",
+        )
 
     def go_home(self, task: str = "motion") -> None:
         self.publish_status(task, "go_home", "running")
@@ -181,24 +200,82 @@ class RobotMotion:
                 task,
             )
 
-    def safe_abort(self, task: str, reason: str) -> None:
-        self.publish_status(task, "safe_abort", "error", reason)
+    def safe_abort(self, task: str, reason: str, code: str = "SAFE_ABORT") -> None:
+        alarm = self._safety.get_last_alarm_text()
+        detail = {"reason": reason}
+        if alarm:
+            detail["last_alarm"] = alarm
+            self._node.get_logger().error(f"[{task}] 알람: {alarm}")
+
+        self.publish_status(
+            task,
+            "safe_abort",
+            "error",
+            reason,
+            extra={"code": code, "detail": detail},
+        )
+
+        try:
+            self.gripper.open()
+        except Exception as exc:
+            self._node.get_logger().warn(f"그리퍼 열기 실패: {exc}")
+
         try:
             retreat = float(self._cfg.get("retreat_height_mm", 100))
             self.retreat_z(retreat, "safe_retreat", task)
             self.go_home(task)
+            self.publish_status(task, "safe_abort", "recovered", "안전 복귀 완료")
         except Exception as exc:
-            self.publish_status(task, "safe_abort", "critical", str(exc))
+            self.publish_status(
+                task,
+                "safe_abort",
+                "critical",
+                f"안전 복귀 실패: {exc}",
+                extra={"code": "RECOVERY_FAILED"},
+            )
 
     def run_sequence(
         self,
         task: str,
         steps: Iterable[tuple[str, Callable[[], None]]],
     ) -> None:
-        for step_name, step_action in steps:
-            try:
-                step_action()
-            except Exception as exc:
-                self.publish_status(task, step_name, "error", str(exc))
-                self.safe_abort(task, str(exc))
-                raise
+        self._safety.start(task)
+        try:
+            for step_name, step_action in steps:
+                self._safety.check_or_raise()
+                try:
+                    step_action()
+                except SafetyViolation as exc:
+                    self.publish_status(
+                        task,
+                        step_name,
+                        "error",
+                        exc.user_message,
+                        extra={"code": exc.code},
+                    )
+                    self.safe_abort(task, exc.user_message, exc.code)
+                    raise
+                except CobotError as exc:
+                    user_msg = exc.user_message or str(exc)
+                    self.publish_status(
+                        task,
+                        step_name,
+                        "error",
+                        user_msg,
+                        extra={"code": exc.code},
+                    )
+                    self.safe_abort(task, user_msg, exc.code)
+                    raise
+                except Exception as exc:
+                    user_msg = f"예기치 않은 오류: {exc}"
+                    self.publish_status(
+                        task,
+                        step_name,
+                        "error",
+                        user_msg,
+                        extra={"code": "UNKNOWN_ERROR"},
+                    )
+                    self.safe_abort(task, user_msg, "UNKNOWN_ERROR")
+                    raise MotionError(str(exc), code="UNKNOWN_ERROR", user_message=user_msg) from exc
+        finally:
+            self._safety.stop()

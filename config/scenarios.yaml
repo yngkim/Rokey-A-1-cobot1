@@ -15,6 +15,15 @@ gripper:
   simulated: true
   settle_time_sec: 0.5
 
+safety:
+  enabled: true
+  monitor_interval_sec: 0.1
+  external_torque_max_norm: 8.0
+  messages:
+    external_force: "외력이 감지되어 동작을 중단했습니다. 환자·물체 접촉 여부를 확인해 주세요."
+    unsafe_robot_state: "로봇이 안전 정지 상태입니다. 티칭 팬던트 알람을 확인해 주세요."
+    motion_failed: "동작 실행에 실패했습니다. 로봇 상태를 확인해 주세요."
+
 open_bottle:
   bottle_pose: [420.0, -180.0, 340.0, 180.0, 0.0, 90.0]
   cap_approach_z_mm: 60

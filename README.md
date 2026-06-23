@@ -114,13 +114,18 @@ ping 192.168.1.100
 
 ## 실행 방법
 
-### 터미널 1 — 로봇 bringup
+### 터미널 1 — 로봇 bringup (`m0609_rg2_bringup`)
 
 ```bash
-~/ros2_ws/src/cobot1/scripts/run_bringup.sh
+export ROS_DOMAIN_ID=41
+source ~/ros2_ws/install/setup.bash
+
+ros2 launch m0609_rg2_bringup bringup.launch.py mode:=real host:=192.168.1.100
 ```
 
-로그에 `Configured and activated dsr_controller2`가 보일 때까지 대기합니다.
+> **주의:** 인자는 `mode:=real` 입니다 (`model:=real` 아님).  
+> 로그에 `Configured and activated dsr_controller2`가 보일 때까지 대기합니다.  
+> 실기 bringup에 **OnRobot RG2 드라이버가 포함**되므로 별도 그리퍼 스크립트는 필요 없습니다.
 
 ### 터미널 2 — 웹 API + UI
 
@@ -185,7 +190,8 @@ cobot1/
 | 증상 | 확인 |
 |------|------|
 | `No executable found` (care_web_api) | `source ~/ros2_ws/install/setup.bash` 후 재빌드 |
-| `Set Robot Mode Service is not available` | bringup 완료 여부, `ROS_DOMAIN_ID=41` 통일 |
+| `Set Robot Mode Service is not available` | `m0609_rg2_bringup` 실행·`ROS_DOMAIN_ID=41` 통일 |
+| bringup 인자 오류 | `mode:=real` 사용 (`model:=real` 아님) |
 | 웹에 예전 버튼이 보임 | `care_web_api` 재시작 + 브라우저 강력 새로고침 |
 | 두 번째 태스크부터 안 됨 | `care_web_api` 최신 버전 사용 (DSR 세션 유지) |
 

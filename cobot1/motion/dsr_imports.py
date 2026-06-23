@@ -36,6 +36,8 @@ def import_dsr_api():
         set_velj,
         set_velx,
         trans,
+        task_compliance_ctrl,
+        release_compliance_ctrl,
     )
     from DR_common2 import posb, posj, posx
 
@@ -66,6 +68,8 @@ def import_dsr_api():
         "set_velj": set_velj,
         "set_velx": set_velx,
         "trans": trans,
+        "task_compliance_ctrl": task_compliance_ctrl,
+        "release_compliance_ctrl": release_compliance_ctrl,
         "posb": posb,
         "posj": posj,
         "posx": posx,

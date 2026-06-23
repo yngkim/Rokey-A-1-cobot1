@@ -3,12 +3,24 @@ import {
   DEFAULT_TASKS,
   checkHealth,
   connectWebSocket,
+  fetchTasks,
   stopTask,
   taskLabelById,
 } from '../api/client'
 
+function isTerminalStatus(data) {
+  const state = data?.state
+  const step = data?.step
+  if (step === 'finish' && state === 'done') return true
+  if (state === 'error' || state === 'stopped') return true
+  if (step === 'safe_abort' && ['error', 'recovered', 'critical'].includes(state)) {
+    return true
+  }
+  return false
+}
+
 export function useRobotApp() {
-  const [tasks] = useState(DEFAULT_TASKS)
+  const [tasks, setTasks] = useState(DEFAULT_TASKS)
   const [apiOnline, setApiOnline] = useState(false)
   const [robotReady, setRobotReady] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -19,6 +31,12 @@ export function useRobotApp() {
   const [toast, setToast] = useState(null)
   const wsRef = useRef(null)
 
+  const clearBusy = useCallback(() => {
+    setBusy(false)
+    setStopping(false)
+    setActiveTaskId('')
+  }, [])
+
   const showSafetyAlert = useCallback((data) => {
     setAlert({
       code: data?.code || '',
@@ -27,14 +45,20 @@ export function useRobotApp() {
       detail: data?.detail || null,
       timestamp: data?.timestamp || Date.now(),
     })
-    setBusy(false)
-    setStopping(false)
-    setActiveTaskId('')
-  }, [])
+    clearBusy()
+  }, [clearBusy])
 
   const showToast = useCallback((message, level = 'info') => {
     setToast({ message, level, id: Date.now() })
     setTimeout(() => setToast(null), 4000)
+  }, [])
+
+  const applySync = useCallback((data) => {
+    if (!data) return
+    setBusy(!!data.busy)
+    setActiveTaskId(data.current_task || '')
+    if (data.last_status) setStatus(data.last_status)
+    if (!data.busy) setStopping(false)
   }, [])
 
   const refreshHealth = useCallback(() => {
@@ -43,7 +67,8 @@ export function useRobotApp() {
         setApiOnline(!!h.api_ok)
         setRobotReady(!!h.robot_ready)
         setBusy(!!h.busy)
-        if (h.current_task) setActiveTaskId(h.current_task)
+        setActiveTaskId(h.current_task || '')
+        if (!h.busy) setStopping(false)
         return h
       })
       .catch(() => {
@@ -51,6 +76,16 @@ export function useRobotApp() {
         setRobotReady(false)
         return null
       })
+  }, [])
+
+  useEffect(() => {
+    fetchTasks()
+      .then((data) => {
+        if (Array.isArray(data?.tasks) && data.tasks.length > 0) {
+          setTasks(data.tasks)
+        }
+      })
+      .catch(() => {})
   }, [])
 
   const handleStop = useCallback(async () => {
@@ -69,6 +104,19 @@ export function useRobotApp() {
     refreshHealth()
 
     const ws = connectWebSocket((msg) => {
+      if (msg.type === 'sync') {
+        applySync(msg.data)
+        return
+      }
+
+      if (msg.type === 'task_complete') {
+        clearBusy()
+        if (msg.data?.success) {
+          showToast('작업이 완료되었습니다')
+        }
+        return
+      }
+
       if (msg.type === 'status') {
         setStatus(msg.data)
         const state = msg.data?.state
@@ -79,23 +127,26 @@ export function useRobotApp() {
           setBusy(true)
           setStopping(false)
         }
-        if (step === 'finish' && state === 'done') {
-          setBusy(false)
-          setStopping(false)
-          setActiveTaskId('')
+
+        if (isTerminalStatus(msg.data)) {
+          clearBusy()
+          if (step === 'finish' && state === 'done') {
+            showToast('작업이 완료되었습니다')
+          }
+          if (state === 'error') {
+            showToast(msg.data.message || '오류 발생', 'error')
+          }
+          if (state === 'stopped') {
+            showToast(msg.data.message || '작업이 중단되었습니다', 'info')
+          }
+          return
         }
-        if (state === 'error' || state === 'stopped') {
-          setBusy(false)
-          setStopping(false)
-          setActiveTaskId('')
-        }
+
         if (state === 'stopping') setStopping(true)
 
         if (state === 'done' && step !== 'finish') {
           showToast(`${step} 완료`)
         }
-        if (state === 'error') showToast(msg.data.message || '오류 발생', 'error')
-        if (state === 'stopped') showToast(msg.data.message || '작업이 중단되었습니다', 'info')
 
         if (
           msg.data?.code === 'EXTERNAL_FORCE' ||
@@ -104,19 +155,20 @@ export function useRobotApp() {
           showSafetyAlert(msg.data)
         }
       }
+
       if (msg.type === 'safety_alert') {
         showSafetyAlert(msg.data)
       }
     })
     wsRef.current = ws
 
-    const healthTimer = setInterval(refreshHealth, 3000)
+    const healthTimer = setInterval(refreshHealth, 2000)
 
     return () => {
       clearInterval(healthTimer)
       ws.close()
     }
-  }, [refreshHealth, showSafetyAlert, showToast])
+  }, [applySync, clearBusy, refreshHealth, showSafetyAlert, showToast])
 
   const activeTaskLabel = taskLabelById(tasks, activeTaskId)
 
@@ -135,5 +187,10 @@ export function useRobotApp() {
     refreshHealth,
     handleStop,
     clearAlert: () => setAlert(null),
+    markTaskStarted: (taskId) => {
+      setBusy(true)
+      setActiveTaskId(taskId)
+      setStopping(false)
+    },
   }
 }

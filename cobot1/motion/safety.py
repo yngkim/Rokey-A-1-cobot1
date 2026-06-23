@@ -74,6 +74,9 @@ class SafetyGuard:
         self._move_stop_request = None
         self._get_robot_state = None
         self._get_last_alarm = None
+        self._force_abort_paused = False
+        self._state_check_paused = False
+        self._contact_search_depth = 0
 
         if self._enabled:
             self._setup_monitor_node()
@@ -128,6 +131,87 @@ class SafetyGuard:
         with self._force_lock:
             self._latest_tool_force = list(msg.data)
 
+    def pause_force_abort(self) -> None:
+        """접촉 탐색 등 — 외력 초과 시 태스크 중단을 일시 해제."""
+        self.begin_contact_search()
+
+    def resume_force_abort(self) -> None:
+        self.end_contact_search()
+
+    def begin_contact_search(self) -> None:
+        """접촉 탐색 모드: 외력·로봇 상태 안전 중단을 일시 해제."""
+        self._contact_search_depth += 1
+        self._force_abort_paused = True
+        self._state_check_paused = True
+        if self._violation is not None and self._violation.code in (
+            "EXTERNAL_FORCE",
+            "UNSAFE_ROBOT_STATE",
+        ):
+            self._violation = None
+            self._abort.clear()
+
+    def end_contact_search(self) -> None:
+        self._contact_search_depth = max(0, self._contact_search_depth - 1)
+        if self._contact_search_depth == 0:
+            self._force_abort_paused = False
+            self._state_check_paused = False
+
+    def read_tool_force_vector(self) -> list[float]:
+        """현재 tool force/torque 6축."""
+        try:
+            from cobot1.motion.dsr_imports import import_dsr_api
+
+            api = import_dsr_api()
+            force = api["get_tool_force"](ref=api["DR_BASE"])
+            if force and force != -1 and len(force) >= 6:
+                return [float(v) for v in force[:6]]
+        except Exception:
+            pass
+
+        with self._force_lock:
+            torque = self._latest_tool_force
+        if torque and len(torque) >= 6:
+            return [float(v) for v in torque[:6]]
+        return [0.0] * 6
+
+    def sample_force_baseline(
+        self,
+        samples: int = 8,
+        interval_sec: float = 0.05,
+    ) -> list[float]:
+        """하강 전 힘 벡터 평균 (그리퍼 닫힌 상태 기준선)."""
+        count = max(1, int(samples))
+        acc = [0.0] * 6
+        for _ in range(count):
+            vec = self.read_tool_force_vector()
+            for i in range(6):
+                acc[i] += vec[i]
+            time.sleep(interval_sec)
+        return [v / count for v in acc]
+
+    def read_tool_force_norm(self) -> float:
+        """현재 tool force 벡터 노름."""
+        vec = self.read_tool_force_vector()
+        return math.sqrt(sum(v * v for v in vec))
+
+    def contact_force_metric(
+        self,
+        baseline: list[float],
+        *,
+        z_only: bool = True,
+        use_delta: bool = True,
+    ) -> float:
+        """접촉 판정용 힘 지표 (Z축 또는 전체 노름)."""
+        current = self.read_tool_force_vector()
+        if z_only:
+            value = current[2] - baseline[2] if use_delta else current[2]
+            return abs(value)
+        if use_delta:
+            return math.sqrt(
+                sum((current[i] - baseline[i]) ** 2 for i in range(6))
+            )
+        return math.sqrt(sum(v * v for v in current))
+
     def start(self, task: str) -> None:
         if not self._enabled:
             return
@@ -170,7 +254,7 @@ class SafetyGuard:
                 code="SAFETY_ABORT",
                 user_message=self._messages["unknown_error"],
             )
-        if self._enabled:
+        if self._enabled and not self._state_check_paused:
             self._check_robot_state()
 
     def _monitor_loop(self) -> None:
@@ -185,6 +269,8 @@ class SafetyGuard:
             time.sleep(self._interval)
 
     def _check_external_torque_from_topic(self) -> None:
+        if self._force_abort_paused:
+            return
         with self._force_lock:
             torque = self._latest_tool_force
         if not torque or len(torque) < 6:
@@ -214,6 +300,8 @@ class SafetyGuard:
             )
 
     def _trigger_abort(self, violation: SafetyViolation) -> None:
+        if self._force_abort_paused:
+            return
         self._violation = violation
         self._abort.set()
         self._publish_alert(violation)

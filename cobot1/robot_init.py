@@ -37,13 +37,19 @@ def wait_for_future(
     future,
     timeout_sec: float | None = None,
     poll_interval: float = 0.05,
+    node=None,
 ) -> bool:
-    """별도 executor 스레드가 spin 중일 때 future 완료를 기다립니다."""
+    """future 완료 대기. node가 있으면 spin_once로 서비스 응답을 처리합니다."""
+    import rclpy
+
     deadline = None if timeout_sec is None else time.monotonic() + timeout_sec
     while not future.done():
         if deadline is not None and time.monotonic() >= deadline:
             return False
-        time.sleep(poll_interval)
+        if node is not None:
+            rclpy.spin_once(node, timeout_sec=poll_interval)
+        else:
+            time.sleep(poll_interval)
     return True
 
 
@@ -92,7 +98,7 @@ def _wait_for_dsr_services(node, timeout_sec: float = SERVICE_WAIT_SEC) -> None:
         "  1) bringup 터미널과 태스크 터미널의 ROS_DOMAIN_ID가 모두 41인지\n"
         "     (echo $ROS_DOMAIN_ID)\n"
         "  2) bringup을 domain 41로 다시 실행했는지\n"
-        "     ~/ros2_ws/src/cobot1/scripts/run_bringup.sh\n"
+        "     ros2 launch m0609_rg2_bringup bringup.launch.py mode:=real host:=192.168.1.100\n"
         "  3) 로그에 'Configured and activated dsr_controller2' 가 보이는지\n"
         "  4) 팬던트에서 SERVO ON + 알람 해제 상태인지\n"
         "  5) ros2 service list | grep set_robot_mode 로 서비스 확인"

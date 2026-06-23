@@ -19,7 +19,7 @@ function TaskButton({ task, disabled, hint, onRun }) {
 
   return (
     <button
-      className={`task-btn ${loading ? 'loading' : ''} ${disabled ? 'disabled' : ''}`}
+      className={`task-btn ${task.id === 'go_home' ? 'task-btn-control' : ''} ${loading ? 'loading' : ''} ${disabled ? 'disabled' : ''}`}
       onClick={handleClick}
       disabled={disabled || loading}
       title={hint}
@@ -52,6 +52,7 @@ export default function App() {
     refreshHealth,
     handleStop,
     clearAlert,
+    markTaskStarted,
   } = useRobotApp()
 
   const conn = connectionLabel(apiOnline, robotReady)
@@ -69,6 +70,7 @@ export default function App() {
     try {
       const result = await runTask(taskId)
       if (result.success) {
+        markTaskStarted(taskId)
         showToast(result.message || '작업을 시작했습니다')
         refreshHealth()
       } else {

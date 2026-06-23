@@ -39,7 +39,7 @@ class WebTaskSession:
         )
         return self._motion
 
-    def run(self, task_id: str) -> None:
+    def run(self, task_id: str) -> bool:
         _ensure_registry()
         if task_id not in TASK_REGISTRY:
             raise ValueError(f"알 수 없는 태스크: {task_id}")
@@ -50,7 +50,14 @@ class WebTaskSession:
             prepare_autonomous_mode()
             scenarios = load_scenarios()
             task = TASK_REGISTRY[task_id](scenarios, motion)
-            task.run()
+            result = task.run()
+            if not result.success:
+                try:
+                    motion.clear_cancel()
+                    motion.recover_pose(task_id)
+                except Exception as exc:
+                    motion._node.get_logger().warn(f"실패 후 복귀: {exc}")
+            return result.success
 
     def request_stop(self) -> bool:
         with self._lock:

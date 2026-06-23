@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from typing import Any
 
 import rclpy
@@ -22,6 +23,7 @@ TASK_CATALOG: list[dict[str, str]] = [
     {"id": "pick_place_pill", "label": "알약 서랍에서 꺼내기", "icon": "💊", "group": "복약"},
     {"id": "place_on_charger", "label": "충전기에 놓기", "icon": "📲", "group": "스마트폰"},
     {"id": "pick_from_charger", "label": "충전기에서 가져오기", "icon": "🔋", "group": "스마트폰"},
+    {"id": "go_home", "label": "기본 위치 복귀", "icon": "🏠", "group": "제어"},
 ]
 
 TASK_IDS = {task["id"] for task in TASK_CATALOG}
@@ -58,6 +60,17 @@ class RosBridge(Node):
         self._robot_ready = self._robot_mode_client.wait_for_service(timeout_sec=0.5)
         return self._robot_ready
 
+    def _is_terminal_status(self, payload: dict[str, Any]) -> bool:
+        state = payload.get("state", "")
+        step = payload.get("step", "")
+        if step == "finish" and state == "done":
+            return True
+        if state in ("error", "stopped"):
+            return True
+        if step == "safe_abort" and state in ("error", "recovered", "critical"):
+            return True
+        return False
+
     def _on_status(self, msg: String) -> None:
         try:
             payload = json.loads(msg.data)
@@ -65,12 +78,14 @@ class RosBridge(Node):
             payload = {"message": msg.data}
         self._last_status = payload
         state = payload.get("state", "")
-        step = payload.get("step", "")
         if payload.get("task"):
             with self._task_lock:
                 self._current_task_id = payload["task"]
-        if state == "running":
-            with self._task_lock:
+        with self._task_lock:
+            if self._is_terminal_status(payload):
+                self._busy = False
+                self._current_task_id = ""
+            elif state == "running":
                 self._busy = True
         self._broadcast({"type": "status", "data": payload})
 
@@ -100,13 +115,18 @@ class RosBridge(Node):
 
     def register_ws(self, ws) -> None:
         self._ws_clients.add(ws)
-        if self._last_status:
-            asyncio.run_coroutine_threadsafe(
-                ws.send_text(
-                    json.dumps({"type": "status", "data": self._last_status}, ensure_ascii=False)
-                ),
-                self._loop,
-            )
+        with self._task_lock:
+            sync = {
+                "busy": self._busy,
+                "current_task": self._current_task_id,
+                "last_status": self._last_status,
+            }
+        asyncio.run_coroutine_threadsafe(
+            ws.send_text(
+                json.dumps({"type": "sync", "data": sync}, ensure_ascii=False)
+            ),
+            self._loop,
+        )
         if self._last_alert:
             asyncio.run_coroutine_threadsafe(
                 ws.send_text(
@@ -118,12 +138,8 @@ class RosBridge(Node):
     def unregister_ws(self, ws) -> None:
         self._ws_clients.discard(ws)
 
-    def _execute_task(self, task_id: str) -> None:
-        try:
-            self._task_session.run(task_id)
-            self.get_logger().info("[%s] finished" % task_id)
-        except Exception as exc:
-            self.get_logger().error(f"태스크 {task_id} 실패: {exc}")
+    def _execute_task(self, task_id: str) -> bool:
+        return self._task_session.run(task_id)
 
     def shutdown_session(self) -> None:
         self._task_session.cleanup()
@@ -152,7 +168,12 @@ class RosBridge(Node):
             }
 
         with self._task_lock:
-            if self._busy:
+            if self._busy and task_id == "go_home":
+                self._task_session.request_stop()
+                time.sleep(1.0)
+                self._busy = False
+                self._current_task_id = ""
+            elif self._busy:
                 return {
                     "success": False,
                     "message": "다른 작업이 실행 중입니다. 완료 후 다시 시도해 주세요.",
@@ -180,12 +201,21 @@ class RosBridge(Node):
         label = next((t["label"] for t in TASK_CATALOG if t["id"] == task_id), task_id)
 
         def _worker():
+            success = False
             try:
-                self._execute_task(task_id)
+                success = self._execute_task(task_id)
+            except Exception as exc:
+                self.get_logger().error(f"태스크 {task_id} 실패: {exc}")
             finally:
                 with self._task_lock:
                     self._busy = False
                     self._current_task_id = ""
+                self._broadcast(
+                    {
+                        "type": "task_complete",
+                        "data": {"task": task_id, "success": success},
+                    }
+                )
 
         threading.Thread(
             target=_worker,

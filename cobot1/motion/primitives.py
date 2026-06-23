@@ -36,6 +36,7 @@ class RobotMotion:
         self._gripper = Gripper(self._node, ctx.gripper_cfg)
         safety_cfg = ctx.safety_cfg or {}
         self._safety = SafetyGuard(self._node, safety_cfg, self.publish_status)
+        self._recovery_joint: list[float] | None = None
         self._import_motion_api()
 
     @property
@@ -48,6 +49,7 @@ class RobotMotion:
 
     def shutdown(self) -> None:
         """안전 감시 등 모션 리소스를 해제합니다."""
+        self._gripper.shutdown()
         self._safety.shutdown()
 
     def clear_cancel(self) -> None:
@@ -84,6 +86,216 @@ class RobotMotion:
         self.posx = api["posx"]
         self.trans = api["trans"]
         self._get_last_alarm = api["get_last_alarm"]
+
+    def get_current_tcp_pose(self) -> list[float]:
+        """현재 TCP pose [x,y,z,rx,ry,rz] (DR_BASE, mm/deg)."""
+        from cobot1.motion.dsr_imports import import_dsr_api
+
+        api = import_dsr_api()
+        pos, _sol = api["get_current_posx"](ref=self.DR_BASE)
+        if pos is None or pos == 0:
+            raise MotionError(
+                "TCP 위치를 읽을 수 없습니다.",
+                code="POSE_READ_FAILED",
+                user_message="로봇 좌표 조회에 실패했습니다.",
+            )
+        raw = list(pos)[:6]
+        return [float(v) for v in raw]
+
+    def move_tcp_to_z(
+        self,
+        z_mm: float,
+        label: str,
+        task: str,
+        vel: Sequence[float] | None = None,
+        acc: Sequence[float] | None = None,
+    ) -> None:
+        pose = self.get_current_tcp_pose()
+        pose[2] = float(z_mm)
+        self.move_task_pose(pose, label, task, vel=vel, acc=acc)
+
+    def move_base_z_delta(
+        self,
+        dz_mm: float,
+        label: str,
+        task: str,
+        vel: Sequence[float] | None = None,
+        acc: Sequence[float] | None = None,
+    ) -> None:
+        """베이스 좌표계 Z만 이동 (수직 하강/상승, 자세 유지)."""
+        pose = self.get_current_tcp_pose()
+        pose[2] += float(dz_mm)
+        self.move_task_pose(pose, label, task, vel=vel, acc=acc)
+
+    def retreat_base_z(
+        self,
+        height_mm: float,
+        label: str,
+        task: str,
+        vel: Sequence[float] | None = None,
+        acc: Sequence[float] | None = None,
+    ) -> None:
+        """베이스 Z+ 방향으로 수직 상승."""
+        self.move_base_z_delta(float(height_mm), label, task, vel=vel, acc=acc)
+
+    def move_vertical_to_z(
+        self,
+        z_mm: float,
+        anchor: Sequence[float],
+        label: str,
+        task: str,
+        vel: Sequence[float] | None = None,
+        acc: Sequence[float] | None = None,
+    ) -> None:
+        """anchor의 XY·자세(RxRyRz) 고정, 베이스 Z만 이동."""
+        target = [
+            float(anchor[0]),
+            float(anchor[1]),
+            float(z_mm),
+            float(anchor[3]),
+            float(anchor[4]),
+            float(anchor[5]),
+        ]
+        self.move_task_pose(target, label, task, vel=vel, acc=acc)
+
+    def probe_down_until_contact(
+        self,
+        task: str,
+        anchor: Sequence[float],
+        baseline_vector: Sequence[float],
+        force_threshold_z: float,
+        max_travel_mm: float,
+        step_mm: float = 0.5,
+        coarse_step_mm: float = 2.0,
+        coarse_travel_mm: float = 60.0,
+        max_force_z: float = 28.0,
+        vel: Sequence[float] | None = None,
+        acc: Sequence[float] | None = None,
+        fine_vel: Sequence[float] | None = None,
+        fine_acc: Sequence[float] | None = None,
+    ) -> tuple[float, float]:
+        """anchor XY·자세 고정, 베이스 Z만 하강. Z축 힘 증가 시 즉시 정지.
+
+        baseline_vector: 그리퍼 닫은 직후(공중) 평균 힘 — 접촉 시 ΔFz로 판정.
+        Returns: (접촉 Z mm, 접촉 시 ΔFz)
+        """
+        if max_travel_mm <= 0 or step_mm <= 0:
+            raise MotionError("max_travel_mm / step_mm 값이 올바르지 않습니다.")
+
+        move_vel = list(vel or [15, 10])
+        move_acc = list(acc or [30, 15])
+        slow_vel = list(fine_vel or [8, 5])
+        slow_acc = list(fine_acc or [16, 8])
+        threshold = float(force_threshold_z)
+        crush_limit = float(max_force_z)
+        baseline = [float(v) for v in baseline_vector[:6]]
+        locked = [float(v) for v in anchor[:6]]
+
+        self.publish_status(
+            task,
+            "probe_down",
+            "running",
+            f"수직 Z- 하강 (ΔFz≥{threshold:.1f}, step≤{step_mm}mm)",
+        )
+
+        def _fz_delta() -> float:
+            return self._safety.contact_force_metric(
+                baseline, z_only=True, use_delta=True
+            )
+
+        def _finish(travelled: float, reason: str) -> tuple[float, float]:
+            self._safety.request_move_stop()
+            time.sleep(0.08)
+            touch_z = locked[2] - travelled
+            touch_fz = _fz_delta()
+            if travelled > 0:
+                backoff_mm = min(1.5, float(step_mm))
+                safe_z = touch_z + backoff_mm
+                self.move_vertical_to_z(
+                    safe_z,
+                    locked,
+                    "contact_backoff",
+                    task,
+                    vel=slow_vel,
+                    acc=slow_acc,
+                )
+            self.publish_status(
+                task,
+                "probe_down",
+                "done",
+                f"뚜껑 접촉 Z={touch_z:.1f}mm (ΔFz={touch_fz:.1f}, {reason})",
+                extra={
+                    "contact_z_mm": touch_z,
+                    "touch_force_z": touch_fz,
+                    "contact_reason": reason,
+                },
+            )
+            return touch_z, touch_fz
+
+        travelled = 0.0
+        while travelled < max_travel_mm:
+            self._check_cancel()
+            fz = _fz_delta()
+            if fz >= crush_limit:
+                return _finish(travelled, "max_force")
+            if fz >= threshold:
+                return _finish(travelled, "contact")
+
+            near_contact = fz >= threshold * 0.4
+            if near_contact or travelled >= coarse_travel_mm:
+                step = min(float(step_mm), max_travel_mm - travelled)
+                v, a = slow_vel, slow_acc
+            else:
+                step = min(float(coarse_step_mm), max_travel_mm - travelled)
+                v, a = move_vel, move_acc
+
+            next_z = locked[2] - travelled - step
+            self.move_vertical_to_z(
+                next_z,
+                locked,
+                f"probe_z_{int(travelled)}",
+                task,
+                vel=v,
+                acc=a,
+            )
+            travelled += step
+
+            fz = _fz_delta()
+            if fz >= crush_limit:
+                return _finish(travelled, "max_force")
+            if fz >= threshold:
+                return _finish(travelled, "contact")
+
+        raise MotionError(
+            f"뚜껑 접촉 미감지 (하강 {travelled:.0f}mm)",
+            code="CONTACT_NOT_FOUND",
+            user_message="뚜껑 높이를 찾지 못했습니다. 탐색 높이·범위를 확인하세요.",
+        )
+
+    def probe_down_until_torque(
+        self,
+        task: str,
+        anchor: Sequence[float],
+        torque_threshold: float,
+        max_travel_mm: float,
+        baseline_torque: float = 0.0,
+        step_mm: float = 0.5,
+        vel: Sequence[float] | None = None,
+        acc: Sequence[float] | None = None,
+    ) -> float:
+        """(호환) 노름 기반 — probe_down_until_contact 사용 권장."""
+        baseline = [0.0, 0.0, float(baseline_torque), 0.0, 0.0, 0.0]
+        contact_z, _ = self.probe_down_until_contact(
+            task,
+            anchor,
+            baseline,
+            force_threshold_z=float(torque_threshold),
+            max_travel_mm=max_travel_mm,
+            step_mm=step_mm,
+            vel=vel,
+            acc=acc,
+        )
+        return contact_z
 
     def publish_status(
         self,
@@ -140,17 +352,37 @@ class RobotMotion:
             user_message="반복 시도 후에도 동작에 실패했습니다.",
         )
 
-    def go_home(self, task: str = "motion") -> None:
-        self.publish_status(task, "go_home", "running")
-        home = self.posj(self._cfg["home_joint"])
-        vel = self._cfg["joint_vel"]
-        acc = self._cfg["joint_acc"]
+    def set_recovery_joint(self, joints: Sequence[float] | None) -> None:
+        """실패·중단 시 movej 복귀 조인트 (미설정 시 home_joint)."""
+        self._recovery_joint = [float(v) for v in joints] if joints else None
+
+    def movej_joint(
+        self,
+        joints: Sequence[float],
+        label: str,
+        task: str,
+        vel: float | None = None,
+        acc: float | None = None,
+    ) -> None:
+        self.publish_status(task, label, "running")
+        target = self.posj(list(joints))
+        v = vel if vel is not None else self._cfg["joint_vel"]
+        a = acc if acc is not None else self._cfg["joint_acc"]
 
         def _move():
-            self.movej(home, vel=vel, acc=acc)
+            self.movej(target, vel=v, acc=a)
 
-        self._run_with_retry("go_home", _move)
-        self.publish_status(task, "go_home", "done")
+        self._run_with_retry(label, _move)
+        self.publish_status(task, label, "done")
+
+    def go_home(self, task: str = "motion") -> None:
+        self.movej_joint(self._cfg["home_joint"], "go_home", task)
+
+    def recover_pose(self, task: str = "motion") -> None:
+        if self._recovery_joint:
+            self.movej_joint(self._recovery_joint, "recover_joint", task)
+        else:
+            self.go_home(task)
 
     def move_task_pose(
         self,
@@ -267,9 +499,7 @@ class RobotMotion:
             self._node.get_logger().warn(f"그리퍼 열기 실패: {exc}")
 
         try:
-            retreat = float(self._cfg.get("retreat_height_mm", 100))
-            self.retreat_z(retreat, "safe_retreat", task)
-            self.go_home(task)
+            self.recover_pose(task)
             self.publish_status(task, "safe_abort", "recovered", "안전 복귀 완료")
         except Exception as exc:
             self.publish_status(

@@ -41,6 +41,7 @@ setup(
             'pick_place_pill = cobot1.pick_place_pill:main',
             'place_on_charger = cobot1.place_on_charger:main',
             'pick_from_charger = cobot1.pick_from_charger:main',
+            'go_home = cobot1.go_home:main',
             'care_server = cobot1.nodes.care_server:main',
             'care_web_api = cobot1.bridge.api_server:main',
         ],

@@ -21,6 +21,7 @@ def register_task(task_cls: Type[BaseTask]) -> Type[BaseTask]:
 def _ensure_registry() -> None:
     if TASK_REGISTRY:
         return
+    from cobot1.tasks.go_home import GoHomeTask
     from cobot1.tasks.open_bottle import OpenBottleTask
     from cobot1.tasks.pick_from_charger import PickFromChargerTask
     from cobot1.tasks.pick_place_pill import PickPlacePillTask
@@ -28,6 +29,7 @@ def _ensure_registry() -> None:
     from cobot1.tasks.pour_water import PourWaterTask
 
     for task_cls in (
+        GoHomeTask,
         OpenBottleTask,
         PourWaterTask,
         PickPlacePillTask,
@@ -62,7 +64,14 @@ def run_task(
             )
         )
         task = TASK_REGISTRY[task_name](scenarios, motion)
-        return task.run()
+        result = task.run()
+        if not result.success:
+            try:
+                motion.clear_cancel()
+                motion.recover_pose(task_name)
+            except Exception as exc:
+                node.get_logger().warn(f"실패 후 복귀: {exc}")
+        return result
     finally:
         if motion is not None:
             motion.shutdown()

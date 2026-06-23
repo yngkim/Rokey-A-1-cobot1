@@ -427,6 +427,15 @@ body {
   pointer-events: none;
 }
 
+.task-btn-control {
+  border-color: rgba(79, 140, 255, 0.55);
+  background: linear-gradient(180deg, #2a3d66 0%, #243352 100%);
+}
+
+.task-btn-control:hover:not(:disabled) {
+  background: linear-gradient(180deg, #334878 0%, #2d3f66 100%);
+}
+
 .task-icon {
   font-size: 1.8rem;
 }

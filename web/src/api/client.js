@@ -29,6 +29,13 @@ export async function stopTask() {
   return data
 }
 
+export async function resetRobot() {
+  const res = await fetch(`${API_BASE}/api/reset`, { method: 'POST' })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.detail || data.message || '초기화 실패')
+  return data
+}
+
 export async function checkHealth() {
   const res = await fetch(`${API_BASE}/api/health`)
   if (!res.ok) throw new Error('서버 연결 실패')

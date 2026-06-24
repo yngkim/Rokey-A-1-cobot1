@@ -102,7 +102,11 @@ class Gripper:
 
     def _wait_for_joint_motion(self, closed: bool) -> None:
         """sendCommand는 즉시 반환하므로 조인트 피드백까지 대기."""
-        if self._driver not in (DRIVER_ONROBOT_ROS, DRIVER_ONROBOT_RG2):
+        if self._driver == DRIVER_ONROBOT_RG2:
+            # Modbus 직접 제어: 별도 조인트 피드백 없음 → settle 시간만 대기
+            time.sleep(self._settle)
+            return
+        if self._driver not in (DRIVER_ONROBOT_ROS,):
             time.sleep(self._settle)
             return
 
@@ -243,3 +247,16 @@ class Gripper:
             )
 
         self._closed = True
+
+    def grip(self, force: float | None = None, width_units: int = 0) -> None:
+        """지정 힘/너비로 약하게 파지 (뚜껑 변형 방지 등).
+
+        onrobot_rg2(Modbus) 외 드라이버는 일반 close() 로 대체한다.
+        """
+        if self._driver == DRIVER_ONROBOT_RG2:
+            self._rg2_client().grip(force, width_units)
+            self._log(f"[gripper:rg2] 약파지 (force={force}, width_units={width_units})")
+            self._wait_for_joint_motion(closed=True)
+            self._closed = True
+            return
+        self.close()

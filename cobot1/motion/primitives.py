@@ -206,8 +206,14 @@ class RobotMotion:
         def _finish(travelled: float, reason: str) -> tuple[float, float]:
             self._safety.request_move_stop()
             time.sleep(0.08)
-            touch_z = locked[2] - travelled
             touch_fz = _fz_delta()
+            # 순응 모드에서 명령 위치(commanded_Z)는 실제 cap 표면보다 아래일 수 있다.
+            # 실제 TCP 위치를 읽어야 올바른 파지 Z를 계산할 수 있다.
+            try:
+                actual_pose = self.get_current_tcp_pose()
+                touch_z = actual_pose[2]
+            except Exception:
+                touch_z = locked[2] - travelled  # fallback: commanded position
             if travelled > 0:
                 backoff_mm = min(1.5, float(step_mm))
                 safe_z = touch_z + backoff_mm
@@ -464,16 +470,27 @@ class RobotMotion:
         label_prefix: str,
         task: str,
         pause_sec: float = 0.15,
+        rise_total_mm: float = 0.0,
+        vel: Sequence[float] | None = None,
+        acc: Sequence[float] | None = None,
     ) -> None:
+        """툴 Z축 회전 + 동시 상승으로 그리퍼를 돌리며 들어올림.
+
+        각 스텝을 단일 movel(상대, 툴좌표)로 수행해 회전(rz)과 상승(-Z)이
+        동시에 일어나도록 한다 → 자연스러운 개봉 궤적. 나사산 피치에 맞게
+        rise_total_mm 를 설정한다.
+        """
         if steps <= 0:
             raise MotionError("twist_steps는 1 이상이어야 합니다")
         step_angle = total_deg / steps
+        rise_per_step = rise_total_mm / steps
         for index in range(steps):
             self._check_cancel()
+            # 회전(툴 Z축 rz)과 상승(툴 -Z)을 한 번의 movel로 동시에 수행
             self.move_relative_tool(
-                [0.0, 0.0, 0.0, 0.0, 0.0, step_angle],
-                f"{label_prefix}_{index + 1}",
-                task,
+                [0.0, 0.0, -rise_per_step, 0.0, 0.0, step_angle],
+                f"{label_prefix}_{index + 1}", task,
+                vel=vel, acc=acc,
             )
             if pause_sec > 0 and index < steps - 1:
                 self.interruptible_sleep(pause_sec)

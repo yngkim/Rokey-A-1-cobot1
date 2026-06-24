@@ -197,6 +197,13 @@ body {
   color: var(--danger);
 }
 
+.safety-modal-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+}
+
 .safety-modal-btn {
   width: 100%;
   padding: 14px;
@@ -211,6 +218,15 @@ body {
 
 .safety-modal-btn:active {
   transform: scale(0.98);
+}
+
+.safety-modal-btn--reset {
+  background: var(--accent);
+}
+
+.safety-modal-btn--reset:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 @keyframes fadeIn {
@@ -434,6 +450,21 @@ body {
 
 .task-btn-control:hover:not(:disabled) {
   background: linear-gradient(180deg, #334878 0%, #2d3f66 100%);
+}
+
+.task-btn-reset {
+  border-color: rgba(255, 200, 60, 0.5);
+  background: linear-gradient(180deg, #3d3210 0%, #2a2208 100%);
+  color: #ffd966;
+}
+
+.task-btn-reset:hover:not(:disabled) {
+  background: linear-gradient(180deg, #4d4018 0%, #3a2e10 100%);
+}
+
+.task-btn-reset:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .task-icon {

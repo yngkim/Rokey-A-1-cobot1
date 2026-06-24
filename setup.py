@@ -37,6 +37,7 @@ setup(
     entry_points={
         'console_scripts': [
             'open_bottle = cobot1.open_bottle:main',
+            'close_bottle = cobot1.close_bottle:main',
             'pour_water = cobot1.pour_water:main',
             'pick_place_pill = cobot1.pick_place_pill:main',
             'place_on_charger = cobot1.place_on_charger:main',

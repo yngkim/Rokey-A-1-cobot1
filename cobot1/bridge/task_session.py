@@ -51,21 +51,21 @@ class WebTaskSession:
             scenarios = load_scenarios()
             task = TASK_REGISTRY[task_id](scenarios, motion)
             result = task.run()
-            if not result.success:
-                try:
-                    motion.clear_cancel()
-                    motion.recover_pose(task_id)
-                except Exception as exc:
-                    motion._node.get_logger().warn(f"실패 후 복귀: {exc}")
+            # recover_pose 는 run_sequence → safe_abort 내부에서 이미 수행된다.
+            # 여기서 다시 호출하면 두 번째 홈 복귀 status("running")가 재발행되어
+            # 웹 UI busy 표시가 초기화되지 않는 버그가 생기므로 제거한다.
+            motion.clear_cancel()
             return result.success
 
     def request_stop(self) -> bool:
-        with self._lock:
-            if self._motion is None:
-                return False
-            task = self._current_task or "motion"
-            self._motion.request_stop(task)
-            return True
+        # self._lock 을 획득하지 않는다: run()이 lock을 점유한 채 실행 중일 때
+        # lock 을 기다리면 데드락이 발생해 정지 신호가 태스크 종료 후에야 전달된다.
+        # CPython GIL 하에서 객체 참조 읽기는 원자적이므로 안전하다.
+        motion = self._motion
+        if motion is None:
+            return False
+        motion.request_stop(self._current_task or "motion")
+        return True
 
     def cleanup(self) -> None:
         with self._lock:

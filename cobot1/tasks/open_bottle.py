@@ -1,4 +1,16 @@
-"""페트병 뚜껑 열기 — 티칭 시작 조인트 → 그리퍼 닫기 → TCP 수직 하강 → 비틀기."""
+"""페트병 뚜껑 열기.
+
+흐름:
+  start_joint (병 위 5cm, 그리퍼 열림)
+  → 툴 +Z 방향으로 grasp_descent_mm 하강 → 파지
+  → J6 회전 + 동시 상승으로 뚜껑 개봉
+  → 툴 -Z 들어올리기 → home TCP 기준 X+0/Y-100 수평 이동
+  → 그리퍼 원자세 복귀(개봉 회전 되돌림) → 바닥(z=237)에 뚜껑 내려놓기
+  → start_joint(시작 위치)로 복귀
+
+start_joint 티칭:
+  병 뚜껑 최상단에서 5cm 위, 그리퍼 수직 하향 자세로 티칭.
+"""
 
 from __future__ import annotations
 
@@ -14,214 +26,115 @@ class OpenBottleTask(BaseTask):
         task = self.name
 
         home_joint = list(self._scenarios["motion"]["home_joint"])
-        start_joint = list(
-            cfg.get(
-                "start_joint",
-                [0.29, 1.68, 74.79, -0.04, 103.54, 10.21],
-            )
-        )
+        start_joint = list(cfg.get("start_joint", [0.29, 1.68, 74.79, -0.04, 103.54, 10.21]))
         motion.set_recovery_joint(home_joint)
 
-        bottle = list(cfg["bottle_pose"])
-        cap_place = list(cfg["cap_place_pose"])
-        place_approach_z = float(cfg["cap_place_approach_z_mm"])
-        place_depth = float(cfg["cap_place_depth_mm"])
-        torque_threshold = float(cfg.get("contact_force_z_threshold", 8.0))
-        contact_retreat = float(cfg.get("contact_retreat_mm", 5.0))
-        grasp_offset_z = float(cfg.get("cap_touch_to_grasp_z_mm", 0.0))
-        probe_vel = cfg.get("probe_vel", [15, 10])
-        probe_acc = cfg.get("probe_acc", [30, 15])
-        probe_fine_vel = cfg.get("probe_fine_vel", [6, 4])
-        probe_fine_acc = cfg.get("probe_fine_acc", [12, 8])
+        grasp_descent    = float(cfg.get("grasp_descent_mm", 60.0))
+        cap_lift         = float(cfg.get("cap_lift_mm", 30.0))
+        grasp_vel        = list(cfg.get("grasp_vel", [15, 10]))   # 섬세 작업용(느림)
+        grasp_acc        = list(cfg.get("grasp_acc", [30, 15]))
+        floor_z          = float(cfg.get("cap_place_floor_z_mm", 237.0))
+        place_approach_z = float(cfg.get("cap_place_approach_z_mm", 50.0))
 
-        cap_anchor: list[float] = []
+        # 일반 이동(빠름) 속도 — 섬세 작업(파지/개봉/내려놓기) 외에는 이 속도 사용
+        fast_vel  = list(cfg.get("fast_vel", [80, 60]))
+        fast_acc  = list(cfg.get("fast_acc", [200, 150]))
+        fast_jvel = float(cfg.get("fast_joint_vel", 60.0))
+        fast_jacc = float(cfg.get("fast_joint_acc", 60.0))
+
+        # 뚜껑 놓을 위치: home_joint([0,0,90,0,90,0]) TCP 기준 X+0/Y-100 (바닥)
+        from cobot1.motion.dsr_imports import import_dsr_api
+        home_tcp = [float(v) for v in import_dsr_api()["fkin"](home_joint)]
+        place_x = home_tcp[0] + 0.0
+        place_y = home_tcp[1] - 100.0
 
         def _release_compliance() -> None:
             try:
                 from cobot1.motion.dsr_imports import import_dsr_api
-
                 import_dsr_api()["release_compliance_ctrl"]()
             except Exception:
                 pass
 
         def _prepare_start() -> None:
-            """티칭 시작 조인트로 이동 (홈에서 툴 수직 올린 자세, 자세 유지)."""
             _release_compliance()
             motion.clear_cancel()
+            motion.movej_joint(start_joint, "move_start_joint", task,
+                               vel=fast_jvel, acc=fast_jacc)
             motion.gripper.open()
-            motion.movej_joint(start_joint, "move_start_joint", task)
 
-        def _find_and_grasp_cap() -> None:
-            """시작 TCP 앵커 고정 → 그리퍼 닫기 → 베이스 Z만 하강 → 잡기."""
-            cap_anchor[:] = motion.get_current_tcp_pose()
-
-            motion.safety.begin_contact_search()
-            try:
-                motion.gripper.close()
-                motion.interruptible_sleep(
-                    float(cfg.get("contact_settle_sec", 0.4))
-                )
-                baseline_vector = motion.safety.sample_force_baseline(
-                    samples=int(cfg.get("contact_baseline_samples", 8)),
-                    interval_sec=float(cfg.get("contact_baseline_interval_sec", 0.05)),
-                )
-
-                contact_z, touch_force_z = motion.probe_down_until_contact(
-                    task,
-                    cap_anchor,
-                    baseline_vector=baseline_vector,
-                    force_threshold_z=torque_threshold,
-                    max_travel_mm=float(cfg.get("search_max_descent_mm", 130.0)),
-                    step_mm=float(cfg.get("contact_step_mm", 0.5)),
-                    coarse_step_mm=float(cfg.get("contact_coarse_step_mm", 2.0)),
-                    coarse_travel_mm=float(cfg.get("contact_coarse_travel_mm", 60.0)),
-                    max_force_z=float(cfg.get("contact_max_force_z", 22.0)),
-                    vel=probe_vel,
-                    acc=probe_acc,
-                    fine_vel=probe_fine_vel,
-                    fine_acc=probe_fine_acc,
-                )
-
-                motion.publish_status(
-                    task,
-                    "contact_detected",
-                    "done",
-                    f"접촉 감지 (ΔFz={touch_force_z:.1f})",
-                    extra={"touch_force_z": touch_force_z, "contact_z_mm": contact_z},
-                )
-
-                lift_z = contact_z + max(
-                    contact_retreat,
-                    float(cfg.get("gripper_open_clearance_mm", 20.0)),
-                )
-                motion.move_vertical_to_z(
-                    lift_z,
-                    cap_anchor,
-                    "lift_for_gripper_open",
-                    task,
-                    vel=probe_vel,
-                    acc=probe_acc,
-                )
-
-                motion.gripper.open()
-
-                grasp_z = contact_z + grasp_offset_z
-                motion.move_vertical_to_z(
-                    grasp_z,
-                    cap_anchor,
-                    "align_cap_grasp",
-                    task,
-                    vel=probe_vel,
-                    acc=probe_acc,
-                )
-                motion.gripper.close()
-                cap_anchor[2] = grasp_z
-            finally:
-                motion.safety.end_contact_search()
-
-            motion.publish_status(
-                task,
-                "cap_grasped",
-                "done",
-                f"뚜껑 잡기 (접촉Z={contact_z:.1f}, graspZ={grasp_z:.1f})",
-                extra={"contact_z_mm": contact_z, "grasp_z_mm": grasp_z},
-            )
-
-        def _grasp_cap_at_taught_pose() -> None:
-            approach_z = float(cfg["cap_approach_z_mm"])
-            grasp_z = float(cfg["cap_grasp_z_mm"])
-            motion.gripper.open()
-            motion.approach_pose(bottle, approach_z, "approach_bottle", task)
-            cap_anchor[:] = motion.get_current_tcp_pose()
-            motion.move_vertical_to_z(
-                grasp_z,
-                cap_anchor,
-                "descend_to_cap",
-                task,
-                vel=probe_vel,
-                acc=probe_acc,
+        def _grasp_cap() -> None:
+            motion.move_relative_tool(
+                [0.0, 0.0, grasp_descent, 0.0, 0.0, 0.0],
+                "descend_to_cap", task,
+                vel=grasp_vel, acc=grasp_acc,
             )
             motion.gripper.close()
-            cap_anchor[2] = grasp_z
 
-        grasp_cap = (
-            _grasp_cap_at_taught_pose
-            if cfg.get("use_contact_search") is False
-            else _find_and_grasp_cap
-        )
-
-        def _press_down() -> None:
-            if not cap_anchor:
-                raise RuntimeError("cap_anchor 미설정")
-            cap_anchor[2] -= float(cfg["twist_down_mm"])
-            motion.move_vertical_to_z(
-                cap_anchor[2],
-                cap_anchor,
-                "press_down",
+        def _twist_open() -> None:
+            # 개봉은 섬세 작업 → 느린 속도
+            motion.rotate_tool_z_steps(
+                float(cfg["twist_angle_deg"]),
+                int(cfg["twist_steps"]),
+                "twist",
                 task,
-                vel=probe_vel,
-                acc=probe_acc,
+                pause_sec=0.0,
+                rise_total_mm=float(cfg.get("twist_rise_mm", 0.0)),
+                vel=grasp_vel,
+                acc=grasp_acc,
             )
 
         def _lift_cap() -> None:
-            if not cap_anchor:
-                raise RuntimeError("cap_anchor 미설정")
-            cap_anchor[2] += float(cfg["cap_lift_mm"])
-            motion.move_vertical_to_z(
-                cap_anchor[2],
-                cap_anchor,
-                "lift_cap",
-                task,
-                vel=probe_vel,
-                acc=probe_acc,
+            motion.move_relative_tool(
+                [0.0, 0.0, -cap_lift, 0.0, 0.0, 0.0],
+                "lift_cap", task,
+                vel=fast_vel, acc=fast_acc,
             )
+
+        def _approach_cap_place() -> None:
+            """먼저 수평(X+0/Y-100)으로만 이동 — 현재 높이·자세 유지, 손목 회전 없음."""
+            cur = motion.get_current_tcp_pose()
+            target = [place_x, place_y, cur[2], cur[3], cur[4], cur[5]]
+            motion.move_task_pose(target, "approach_cap_place", task,
+                                  vel=fast_vel, acc=fast_acc)
 
         def _place_cap_down() -> None:
-            place_anchor = list(cap_place)
-            place_z = float(cap_place[2]) + place_depth
-            motion.move_vertical_to_z(
-                place_z,
-                place_anchor,
-                "place_cap_down",
-                task,
-                vel=probe_vel,
-                acc=probe_acc,
+            """수평 이동 후 그 자리에서 Z만 바닥(floor_z)까지 수직 하강 — 자세 유지, floor_z 이하로 절대 내려가지 않음."""
+            cur = motion.get_current_tcp_pose()
+            target = [place_x, place_y, floor_z, cur[3], cur[4], cur[5]]
+            motion.move_task_pose(target, "place_cap_down", task,
+                                  vel=grasp_vel, acc=grasp_acc)
+
+        def _unrotate_cap() -> None:
+            """개봉으로 돌아간 그리퍼를 원래 자세로 되돌림 (바닥에 놓기 전)."""
+            twist_angle = float(cfg["twist_angle_deg"])
+            motion.move_relative_tool(
+                [0.0, 0.0, 0.0, 0.0, 0.0, -twist_angle],
+                "unrotate_cap", task,
+                vel=fast_vel, acc=fast_acc,
             )
 
-        def _home_finish() -> None:
-            """시작 조인트(들어올린 자세) → 홈 조인트 순으로 복귀."""
-            motion.movej_joint(start_joint, "return_start_joint", task)
-            motion.movej_joint(home_joint, "home_finish", task)
+        def _retract_from_place() -> None:
+            """뚜껑 놓은 뒤 approach 높이로 복귀 — 자세 유지."""
+            cur = motion.get_current_tcp_pose()
+            target = [place_x, place_y, floor_z + place_approach_z, cur[3], cur[4], cur[5]]
+            motion.move_task_pose(target, "retract_from_place", task,
+                                  vel=fast_vel, acc=fast_acc)
+
+        def _return_to_start() -> None:
+            """뚜껑을 놓은 뒤 태스크 시작 위치(start_joint)로 복귀."""
+            motion.movej_joint(start_joint, "return_to_start", task,
+                               vel=fast_jvel, acc=fast_jacc)
 
         steps = [
-            ("prepare_start", _prepare_start),
-            ("find_cap_height", grasp_cap),
-            ("press_down", _press_down),
-            (
-                "twist_open",
-                lambda: motion.rotate_tool_z_steps(
-                    float(cfg["twist_angle_deg"]),
-                    int(cfg["twist_steps"]),
-                    "twist",
-                    task,
-                    pause_sec=0.2,
-                ),
-            ),
-            ("lift_cap", _lift_cap),
-            (
-                "move_cap_place",
-                lambda: motion.approach_pose(
-                    cap_place, place_approach_z, "move_cap_place", task
-                ),
-            ),
-            ("place_cap_down", _place_cap_down),
-            ("release_cap", motion.gripper.open),
-            (
-                "retract_from_place",
-                lambda: motion.retreat_base_z(
-                    place_approach_z, "retract_from_place", task
-                ),
-            ),
-            ("home_finish", _home_finish),
+            ("prepare_start",      _prepare_start),
+            ("grasp_cap",          _grasp_cap),
+            ("twist_open",         _twist_open),
+            ("lift_cap",           _lift_cap),
+            ("approach_cap_place", _approach_cap_place),
+            ("unrotate_cap",       _unrotate_cap),
+            ("place_cap_down",     _place_cap_down),
+            ("release_cap",        motion.gripper.open),
+            ("retract_from_place", _retract_from_place),
+            ("return_to_start",    _return_to_start),
         ]
         motion.run_sequence(task, steps)

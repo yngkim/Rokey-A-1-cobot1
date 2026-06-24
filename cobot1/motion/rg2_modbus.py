@@ -99,3 +99,8 @@ class Rg2ModbusClient:
 
     def close(self) -> None:
         self._write_command(self._max_force, 0, _RCTR_MOVE)
+
+    def grip(self, force: int | None = None, width_units: int = 0) -> None:
+        """지정 힘/너비로 파지 (약하게 잡기 등). force None 이면 최대 힘."""
+        f = int(force) if force is not None else self._max_force
+        self._write_command(f, int(width_units), _RCTR_MOVE)

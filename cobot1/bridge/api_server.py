@@ -45,10 +45,13 @@ class RosBridge(Node):
         self.create_subscription(String, "cobot1/status", self._on_status, 10)
         self.create_subscription(String, "cobot1/safety_alert", self._on_alert, 10)
 
-        from dsr_msgs2.srv import SetRobotMode
+        from dsr_msgs2.srv import SetRobotControl, SetRobotMode
 
         self._robot_mode_client = self.create_client(
             SetRobotMode, "system/set_robot_mode"
+        )
+        self._robot_control_client = self.create_client(
+            SetRobotControl, "system/set_robot_control"
         )
         self.refresh_robot_ready()
         self.get_logger().info(
@@ -138,6 +141,86 @@ class RosBridge(Node):
     def unregister_ws(self, ws) -> None:
         self._ws_clients.discard(ws)
 
+    def _reset_safe_stop(self) -> bool:
+        """SAFE_STOP(5) 또는 SAFE_OFF(3) 상태에서 STANDBY로 복귀 요청.
+
+        SetRobotControl 서비스를 직접 호출한다. 이미 ROS executor가 별도
+        스레드에서 spin 중이므로 future.done() 폴링으로 완료를 기다린다.
+        """
+        from dsr_msgs2.srv import SetRobotControl
+
+        if not self._robot_control_client.wait_for_service(timeout_sec=3.0):
+            self.get_logger().warning("SetRobotControl 서비스 없음")
+            return False
+
+        for control_code, label in [(2, "SAFE_STOP→STANDBY"), (3, "SAFE_OFF→STANDBY")]:
+            req = SetRobotControl.Request()
+            req.robot_control = control_code
+            future = self._robot_control_client.call_async(req)
+
+            deadline = time.time() + 5.0
+            while not future.done() and time.time() < deadline:
+                time.sleep(0.05)
+
+            if future.done():
+                result = future.result()
+                if result is not None and result.success:
+                    self.get_logger().info(f"로봇 상태 해제 성공 ({label})")
+                    return True
+
+        self.get_logger().warning("SetRobotControl 두 코드 모두 실패 — 이미 정상 상태이거나 복구 불가")
+        return False
+
+    def reset_and_home(self) -> dict[str, Any]:
+        """SAFE_STOP 해제 → 세션 정리 → 홈 복귀 (백그라운드 스레드).
+
+        정상 상태에서 호출하면 SAFE_STOP 해제를 건너뛰고 바로 홈 복귀한다.
+        busy 중이면 stop 요청 후 1 초 대기하고 진행한다.
+        """
+        self._reset_safe_stop()  # 이미 정상이면 no-op (실패해도 계속 진행)
+
+        with self._task_lock:
+            if self._busy:
+                self._task_session.request_stop()
+                self._busy = False
+                self._current_task_id = ""
+                time.sleep(0.5)
+
+        self._task_session.cleanup()
+
+        _ensure_registry()
+        if "go_home" not in TASK_REGISTRY:
+            return {
+                "success": False,
+                "message": "go_home 태스크가 등록되지 않았습니다.",
+                "code": "NOT_FOUND",
+            }
+
+        with self._task_lock:
+            self._busy = True
+            self._current_task_id = "go_home"
+
+        def _worker():
+            success = False
+            try:
+                success = self._execute_task("go_home")
+            except Exception as exc:
+                self.get_logger().error(f"홈 복귀 실패: {exc}")
+            finally:
+                with self._task_lock:
+                    self._busy = False
+                    self._current_task_id = ""
+                self._broadcast(
+                    {"type": "task_complete", "data": {"task": "go_home", "success": success}}
+                )
+
+        threading.Thread(target=_worker, name="cobot1_reset_home", daemon=True).start()
+        return {
+            "success": True,
+            "message": "SAFE_STOP 해제 후 홈 복귀를 시작합니다.",
+            "code": "STARTED",
+        }
+
     def _execute_task(self, task_id: str) -> bool:
         return self._task_session.run(task_id)
 
@@ -155,7 +238,7 @@ class RosBridge(Node):
         stopped = self._task_session.request_stop()
         return {
             "success": stopped,
-            "message": "정지 요청을 보냈습니다. 로봇이 안전하게 멈춥니다.",
+            "message": "작업을 중단하고 기본 위치로 복귀합니다.",
             "code": "STOPPING",
         }
 
@@ -365,6 +448,14 @@ def create_app():
         if bridge is None:
             raise HTTPException(status_code=503, detail="ROS bridge 초기화 중")
         return bridge.stop_task()
+
+    @app.post("/api/reset")
+    def reset_robot():
+        """SAFE_STOP 해제 후 홈 위치로 복귀. 안전 정지 이후 복구에 사용."""
+        bridge = bridge_holder.get("bridge")
+        if bridge is None:
+            raise HTTPException(status_code=503, detail="ROS bridge 초기화 중")
+        return bridge.reset_and_home()
 
     @app.websocket("/ws")
     async def websocket_endpoint(ws: WebSocket):

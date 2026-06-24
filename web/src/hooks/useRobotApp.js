@@ -1,9 +1,11 @@
+
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   DEFAULT_TASKS,
   checkHealth,
   connectWebSocket,
   fetchTasks,
+  resetRobot,
   stopTask,
   taskLabelById,
 } from '../api/client'
@@ -25,6 +27,7 @@ export function useRobotApp() {
   const [robotReady, setRobotReady] = useState(false)
   const [busy, setBusy] = useState(false)
   const [stopping, setStopping] = useState(false)
+  const [resetting, setResetting] = useState(false)
   const [activeTaskId, setActiveTaskId] = useState('')
   const [status, setStatus] = useState(null)
   const [alert, setAlert] = useState(null)
@@ -34,6 +37,7 @@ export function useRobotApp() {
   const clearBusy = useCallback(() => {
     setBusy(false)
     setStopping(false)
+    setResetting(false)
     setActiveTaskId('')
   }, [])
 
@@ -99,6 +103,20 @@ export function useRobotApp() {
       setStopping(false)
     }
   }, [showToast, stopping])
+
+  const handleReset = useCallback(async () => {
+    if (resetting) return
+    setResetting(true)
+    try {
+      const result = await resetRobot()
+      showToast(result.message || 'SAFE_STOP 해제 후 홈 복귀 중...', 'info')
+      setBusy(true)
+      setActiveTaskId('go_home')
+    } catch (err) {
+      showToast(err.message || '초기화 실패', 'error')
+      setResetting(false)
+    }
+  }, [resetting, showToast])
 
   useEffect(() => {
     refreshHealth()
@@ -186,6 +204,8 @@ export function useRobotApp() {
     showToast,
     refreshHealth,
     handleStop,
+    handleReset,
+    resetting,
     clearAlert: () => setAlert(null),
     markTaskStarted: (taskId) => {
       setBusy(true)

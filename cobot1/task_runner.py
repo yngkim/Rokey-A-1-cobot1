@@ -21,6 +21,7 @@ def register_task(task_cls: Type[BaseTask]) -> Type[BaseTask]:
 def _ensure_registry() -> None:
     if TASK_REGISTRY:
         return
+    from cobot1.tasks.close_bottle import CloseBottleTask
     from cobot1.tasks.go_home import GoHomeTask
     from cobot1.tasks.open_bottle import OpenBottleTask
     from cobot1.tasks.pick_from_charger import PickFromChargerTask
@@ -31,6 +32,7 @@ def _ensure_registry() -> None:
     for task_cls in (
         GoHomeTask,
         OpenBottleTask,
+        CloseBottleTask,
         PourWaterTask,
         PickPlacePillTask,
         PlaceOnChargerTask,

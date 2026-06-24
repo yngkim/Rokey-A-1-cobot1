@@ -44,6 +44,7 @@ export default function App() {
     robotReady,
     busy,
     stopping,
+    resetting,
     activeTaskLabel,
     status,
     alert,
@@ -51,6 +52,7 @@ export default function App() {
     showToast,
     refreshHealth,
     handleStop,
+    handleReset,
     clearAlert,
     markTaskStarted,
   } = useRobotApp()
@@ -107,7 +109,9 @@ export default function App() {
         </div>
       )}
 
-      {alert && <SafetyAlertModal alert={alert} onClose={clearAlert} />}
+      {alert && (
+        <SafetyAlertModal alert={alert} onClose={clearAlert} onReset={handleReset} resetting={resetting} />
+      )}
 
       <main className={`app-main ${busy ? 'dimmed' : ''}`}>
         {groups.map((group) => (
@@ -128,6 +132,22 @@ export default function App() {
             </div>
           </section>
         ))}
+
+        <section className="task-section">
+          <h2>복구</h2>
+          <div className="task-grid">
+            <button
+              className={`task-btn task-btn-reset ${resetting ? 'loading' : ''}`}
+              onClick={handleReset}
+              disabled={resetting}
+              title="SAFE_STOP 해제 후 홈 위치로 복귀합니다"
+            >
+              <span className="task-icon">🔄</span>
+              <span className="task-label">초기화 / 홈 복귀</span>
+              {resetting && <span className="task-spinner" />}
+            </button>
+          </div>
+        </section>
       </main>
 
       <footer className="status-bar">

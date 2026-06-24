@@ -13,13 +13,13 @@ motion:
   retry_count: 2
 
 gripper:
-  driver: onrobot_ros   # m0609_rg2_bringup 그리퍼 서비스 (/onrobot/sendCommand)
-  # driver: onrobot_rg2  # (대체) Modbus 직접 — bringup 그리퍼와 동시 사용 금지
+  driver: onrobot_rg2   # Modbus TCP 직접 제어 — OnRobotRGControllerServer 불필요
+  # driver: onrobot_ros  # (대체) /onrobot/sendCommand 서비스 — bringup 별도 실행 필요
   modbus_ip: 192.168.1.1
   modbus_port: 502
   changer_addr: 65
   force: 400
-  settle_time_sec: 0.3
+  settle_time_sec: 0.8
   motion_timeout_sec: 6.0
   joint_states_topic: /gripper_joint_states
   finger_joint_name: rg2_finger_joint
@@ -36,36 +36,56 @@ safety:
     unsafe_robot_state: "로봇이 안전 정지 상태입니다. 티칭 팬던트 알람을 확인해 주세요."
     motion_failed: "동작 실행에 실패했습니다. 로봇 상태를 확인해 주세요."
 
-# 1. 페트병 뚜껑 열기 (수직 하강 + 외력 토크로 뚜껑 높이 탐색)
+# 1. 페트병 뚜껑 열기 (툴 +Z 상대 이동 방식)
 open_bottle:
-  # 홈 [0,0,90,0,90,0] 에서 툴 수직 올린 탐색 시작 조인트 (티칭값)
+  # start_joint: 병 뚜껑 최상단에서 5cm 위, 그리퍼 수직 하향 자세
+  # [티칭] 팬던트로 이 위치를 잡고 조인트값 저장 후 아래 값 갱신
   start_joint: [0.29, 1.68, 74.79, -0.04, 103.54, 10.21]
-  bottle_pose: [420.0, -180.0, 340.0, 180.0, 0.0, 90.0]  # cap_place 등 보조용
-  use_contact_search: true
-  search_max_descent_mm: 130.0            # 시작 위치에서 최대 하강 (mm)
-  contact_force_z_threshold: 8.0    # 뚜껑 접촉 ΔFz (기준선 대비, N) — 만났을 때 정지
-  contact_max_force_z: 22.0         # ΔFz 상한 — 초과 시 즉시 정지 (병 찌그러짐 방지)
-  contact_baseline_samples: 8       # 하강 전 힘 평균 샘플 수
-  contact_settle_sec: 0.4           # 그리퍼 닫힌 후 안정화
-  contact_step_mm: 0.5             # 접촉 근처 미세 하강 (mm)
-  contact_coarse_step_mm: 2.0       # 접촉 전 빠른 하강 (mm)
-  contact_coarse_travel_mm: 60.0    # 이 거리까지 coarse, 이후 fine
-  contact_retreat_mm: 5.0          # 접촉 후 최소 Z+ 리트릿 (mm)
-  gripper_open_clearance_mm: 20.0  # 그리퍼 열기 전 Z+ (뚜껑·손가락 간섭 방지)
-  cap_touch_to_grasp_z_mm: 0.0     # 접촉 Z = 잡기 Z (필요 시 mm 보정)
-  probe_vel: [15, 10]              # coarse 하강 속도
-  probe_acc: [30, 15]
-  probe_fine_vel: [6, 4]           # 접촉 근처 미세 하강 속도
-  probe_fine_acc: [12, 8]
-  cap_approach_z_mm: 70
-  cap_grasp_z_mm: 12
-  twist_angle_deg: 200.0
+
+  # 파지 하강 거리 (툴 +Z, mm)
+  # start_joint(병 위 5cm)에서 뚜껑 파지 위치까지 내려가는 거리
+  # 예: 접근 높이 50mm + 뚜껑 파지 깊이 10mm = 60mm
+  grasp_descent_mm: 79.0
+
+  # 파지/개봉/내려놓기 등 섬세 작업 속도 (느릴수록 위치 정밀도↑)
+  grasp_vel: [15, 10]
+  grasp_acc: [30, 15]
+
+  # 일반 이동(빠름) 속도 — 섬세 작업 외 전부 이 속도
+  fast_vel: [80, 60]
+  fast_acc: [200, 150]
+  fast_joint_vel: 60.0
+  fast_joint_acc: 60.0
+
+  # 뚜껑 개봉 파라미터
+  twist_angle_deg: -200.0  # 총 회전각 (deg, 음수 = 열리는 방향)
+  twist_steps: 8            # 단계 수
+  twist_rise_mm: 5.0        # 개봉 중 상승 거리 (나사산 피치, mm)
+  cap_lift_mm: 30.0         # 개봉 후 추가 들어올리기 (mm, 툴 -Z)
+
+  # 뚜껑 내려놓기 위치: home([0,0,90,0,90,0]) TCP 기준 X+0/Y-20 바닥
+  # cap_place_floor_z_mm: 뚜껑 잡은 그리퍼가 바닥에 닿는 Z(mm). 이 값 이하로 절대 내려가지 않음
+  cap_place_floor_z_mm: 237.0
+  cap_place_approach_z_mm: 50.0
+
+# 1-2. 페트병 뚜껑 닫기 (open_bottle 역순) — 뚜껑이 바닥에 놓여 있다고 가정
+# open_bottle 과 동일한 좌표/파라미터를 사용해야 같은 위치에서 뚜껑을 집는다.
+close_bottle:
+  start_joint: [0.29, 1.68, 74.79, -0.04, 103.54, 10.21]
+  grasp_descent_mm: 79.0
+  grasp_vel: [15, 10]       # 섬세 작업용(느림)
+  grasp_acc: [30, 15]
+  fast_vel: [80, 60]        # 일반 이동(빠름)
+  fast_acc: [200, 150]
+  fast_joint_vel: 60.0
+  fast_joint_acc: 60.0
+  twist_angle_deg: -200.0   # open_bottle 과 동일 (닫기는 코드에서 부호 반전, 2스텝 적게 조임)
   twist_steps: 8
-  twist_down_mm: 4
-  cap_lift_mm: 30
-  cap_place_pose: [450.0, -250.0, 295.0, 180.0, 0.0, 90.0]
-  cap_place_approach_z_mm: 50
-  cap_place_depth_mm: 5
+  twist_rise_mm: 5.0        # 나사산 피치 (닫기 시 동일 거리만큼 하강)
+  grip_force: 100.0         # 바닥 뚜껑 약파지 힘(낮을수록 뚜껑 변형↓, 최대 ~400)
+  floor_pick_extra_mm: 5.0  # 바닥 뚜껑 파지 시 floor_z 보다 더 내려가는 깊이(약 0.5cm)
+  cap_place_floor_z_mm: 237.0
+  cap_place_approach_z_mm: 50.0
 
 # 기본 위치 복귀
 go_home:

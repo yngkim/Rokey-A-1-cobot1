@@ -138,14 +138,33 @@ pour_water:
   pour_duration_sec: 3.0
   pre_pour_pause_sec: 0.5
 
-# 3. 알약 서랍 → 옮기기
+# 3. 알약 서랍 → 옮기기 (조인트 deg, 티칭값)
 pick_place_pill:
-  drawer_pose: [350.0, -220.0, 280.0, 180.0, 0.0, 90.0]
-  place_pose: [480.0, -100.0, 310.0, 180.0, 0.0, 90.0]
-  drawer_approach_z_mm: 90
-  pick_depth_mm: 12
-  place_depth_mm: 8
-  drawer_pull_back_mm: 15
+  drawer_grasp_joint:  [-8.1, 40.74, 108.1, -3.4, -58.88, 1.65]   # 서랍 손잡이 파지
+  drawer_pulled_joint: [-9.71, 30.83, 133.33, -4.39, -74.03, 1.19]  # 서랍 당긴 후
+  pill_above_joint:    [18.86, 14.23, 104.58, -117.22, -49.04, 83.46]  # 약통 위
+  pill_below_joint:    [21.03, 21.02, 106.5, -119.41, -43.71, 83.46]   # 약통 아래
+  pill_retract_joint:  [4.58, 5.53, 104.67, -131.2, -65.3, 90.08]    # 놓고 후퇴
+  lift_clearance_mm: 120.0
+  drawer_grip_force: 100.0
+  drawer_grasp_settle_sec: 4.5
+  # 서랍 당김 ~ 약 놓기
+  carry_joint_vel: 15.0   # pull_drawer (조인트)
+  carry_joint_acc: 15.0
+  carry_vel: [25, 20]     # 약통 위 XY 수평 이동 (TCP)
+  carry_acc: [50, 40]
+  # 놓기 후 ~ home 복귀 (느림)
+  return_joint_vel: 15.0
+  return_joint_acc: 15.0
+  return_vel: [25, 20]
+  return_acc: [50, 40]
+  # 초기 접근·home 준비 (빠름)
+  fast_joint_vel: 60.0
+  fast_joint_acc: 60.0
+  grasp_vel: [15, 10]
+  grasp_acc: [30, 15]
+  fast_vel: [80, 60]
+  fast_acc: [200, 150]
 
 # 4. 스마트폰 무선충전기 (놓기 / 가져오기)
 place_on_charger:

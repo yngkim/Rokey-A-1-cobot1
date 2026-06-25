@@ -1,13 +1,48 @@
 export const DEFAULT_TASKS = [
-  { id: 'open_bottle', label: '페트병 뚜껑 열기', icon: '🍼', group: '음료' },
-  { id: 'pour_water', label: '물 따르기', icon: '💧', group: '음료' },
-  { id: 'pick_place_pill', label: '알약 서랍에서 꺼내기', icon: '💊', group: '복약' },
+  { id: 'prepare_medication', label: '약 준비하기', icon: '💊', group: '복약' },
   { id: 'place_on_charger', label: '충전기에 놓기', icon: '📲', group: '스마트폰' },
   { id: 'pick_from_charger', label: '충전기에서 가져오기', icon: '🔋', group: '스마트폰' },
   { id: 'go_home', label: '기본 위치 복귀', icon: '🏠', group: '제어' },
 ]
 
 const API_BASE = import.meta.env.VITE_API_BASE || ''
+
+export async function fetchVoiceCatalog() {
+  const res = await fetch(`${API_BASE}/api/voice/catalog`)
+  if (!res.ok) throw new Error('음성 설정을 불러오지 못했습니다')
+  return res.json()
+}
+
+export async function sendVoiceCommand(text) {
+  const res = await fetch(`${API_BASE}/api/voice/command`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+  })
+  let data = {}
+  try {
+    data = await res.json()
+  } catch {
+    data = {}
+  }
+  if (!res.ok) {
+    if (res.status === 405) {
+      throw new Error(
+        '음성 API에 연결되지 않았습니다. colcon build 후 ros2 run cobot1 care_web_api 를 재시작하세요.',
+      )
+    }
+    const detail = typeof data.detail === 'string' ? data.detail : data.message
+    throw new Error(detail || `음성 명령 실패 (HTTP ${res.status})`)
+  }
+  return data
+}
+
+export async function forceIdle() {
+  const res = await fetch(`${API_BASE}/api/force_idle`, { method: 'POST' })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.detail || data.message || '잠금 해제 실패')
+  return data
+}
 
 export async function fetchTasks() {
   const res = await fetch(`${API_BASE}/api/tasks`)

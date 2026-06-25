@@ -80,7 +80,7 @@ open_bottle:
   # cap_place_floor_z_mm: 뚜껑 잡은 그리퍼가 바닥에 닿는 Z(mm). 이 값 이하로 절대 내려가지 않음
   cap_place_floor_z_mm: 237.0
   cap_place_approach_z_mm: 50.0
-  holder_place_extra_mm: 11.0  # 컵홀더 안착 시 티칭 Z 보다 더 하강(기본 5mm + 추가 6mm)
+  holder_place_extra_mm: 6.0   # 컵홀더 안착 시 티칭 Z 보다 더 하강 (11→6: 놓는 높이 +5mm)
   regrasp_lift_mm: 100.0       # 병 놓은 뒤 재파지·개봉 전 수직 상승(약 10cm)
 
 # 1-2. 페트병 뚜껑 닫기 (open_bottle 역순) — 뚜껑이 바닥에 놓여 있다고 가정
@@ -113,7 +113,7 @@ go_home:
 # 2. 물 따르기 (open_bottle 직후, 물병이 컵홀더에 개봉된 채 꽂혀 있다고 가정)
 # 포즈는 조인트 각도(deg). 컵/복귀 이송은 fkin TCP + Z↑→XY→Z↓
 pour_water:
-  body_grasp_joint: [-42.44, 44.58, 101.47, 52.00, 112.40, -63.81]   # 컵홀더 몸통 파지
+  body_grasp_joint: [-41.99, 44.05, 101.32, 52.69, 112.6, -63.1]   # 컵홀더 몸통 파지
   cup_side_joint:   [19.84, 35.26, 116.6, 106.22, 81.39, -63.12]     # 컵 옆 세운 상태
   # pour_tilt_joint: 참고용 티칭값 (코드 미사용 — J6 상대 회전 pour_tilt_delta_j6_deg 사용)
   pour_tilt_delta_j6_deg: -80.0  # cup_side J6 기준 최대 기울임(부호·크기 현장 튜닝)
@@ -142,17 +142,26 @@ pour_water:
 pick_place_pill:
   drawer_grasp_joint:  [-8.1, 40.74, 108.1, -3.4, -58.88, 1.65]   # 서랍 손잡이 파지
   drawer_pulled_joint: [-9.71, 30.83, 133.33, -4.39, -74.03, 1.19]  # 서랍 당긴 후
-  pill_above_joint:    [18.86, 14.23, 104.58, -117.22, -49.04, 83.46]  # 약통 위
-  pill_below_joint:    [21.03, 21.02, 106.5, -119.41, -43.71, 83.46]   # 약통 아래
-  pill_retract_joint:  [4.58, 5.53, 104.67, -131.2, -65.3, 90.08]    # 놓고 후퇴
+  pill_above_joint:    [18.86, 14.23, 104.58, -117.22, -49.04, 83.46]  # 약통 위 (덤프 기준)
+  cabinet_top_joint:    [-7.98, 29.54, 106.28, -3.74, -46.16, 2.36]   # 서랍장 위 접근
+  cabinet_place_joint:  [-8.0, 32.31, 106.91, -3.74, -49.44, 2.27]   # 서랍장 위 내려놓기
+  cabinet_retract_joint: [-8.35, 26.43, 117.68, -3.85, -54.17, 2.20] # 놓은 뒤 후퇴
+  dump_tilt_delta_j6_deg: -180.0  # 서랍 뒤집어 약 봉지 덤프
+  dump_duration_sec: 2.0         # 봉지 떨어질 때까지 대기
+  dump_joint_vel: 8.0
+  dump_joint_acc: 8.0
   lift_clearance_mm: 120.0
   drawer_grip_force: 100.0
   drawer_grasp_settle_sec: 4.5
   # 서랍 당김 ~ 약 놓기
   carry_joint_vel: 15.0   # pull_drawer (조인트)
   carry_joint_acc: 15.0
-  carry_vel: [25, 20]     # 약통 위 XY 수평 이동 (TCP)
+  carry_vel: [25, 20]     # 약통·서랍장 XY 이동 (TCP)
   carry_acc: [50, 40]
+  place_vel: [5, 3]       # 서랍장 위 수직 하강·안착 (매우 느림)
+  place_acc: [10, 6]
+  retract_joint_vel: 8.0  # 놓은 뒤 후퇴
+  retract_joint_acc: 8.0
   # 놓기 후 ~ home 복귀 (느림)
   return_joint_vel: 15.0
   return_joint_acc: 15.0

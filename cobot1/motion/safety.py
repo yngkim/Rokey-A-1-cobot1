@@ -229,6 +229,9 @@ class SafetyGuard:
 
     def stop(self) -> None:
         self._abort.set()
+        self._contact_search_depth = 0
+        self._force_abort_paused = False
+        self._state_check_paused = False
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
         self._thread = None

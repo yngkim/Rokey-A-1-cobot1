@@ -37,6 +37,8 @@ class RobotMotion:
         safety_cfg = ctx.safety_cfg or {}
         self._safety = SafetyGuard(self._node, safety_cfg, self.publish_status)
         self._recovery_joint: list[float] | None = None
+        self._move_stop_client = None
+        self._move_stop_request = None
         self._import_motion_api()
 
     @property
@@ -46,6 +48,13 @@ class RobotMotion:
     @property
     def safety(self) -> SafetyGuard:
         return self._safety
+
+    def pause_safety_force_abort(self) -> None:
+        """의도적 접촉·파지 구간 — 외력 초과 안전 중단 일시 해제."""
+        self._safety.begin_contact_search()
+
+    def resume_safety_force_abort(self) -> None:
+        self._safety.end_contact_search()
 
     def shutdown(self) -> None:
         """안전 감시 등 모션 리소스를 해제합니다."""
@@ -59,7 +68,47 @@ class RobotMotion:
         """사용자 정지 — 모션 중단 요청."""
         self._cancel.set()
         self.publish_status(task, "user_stop", "stopping", "정지 요청됨")
+        self._call_move_stop()
         self._safety.request_move_stop()
+
+    def _call_move_stop(self) -> None:
+        """메인 DSR 노드에서 move_stop 호출 (블로킹 movel 중단)."""
+        from dsr_msgs2.srv import MoveStop
+
+        from cobot1.robot_init import wait_for_future
+
+        if self._move_stop_client is None:
+            self._move_stop_client = self._node.create_client(
+                MoveStop, "motion/move_stop"
+            )
+            self._move_stop_request = MoveStop.Request()
+        client = self._move_stop_client
+        if not client.wait_for_service(timeout_sec=0.5):
+            self._node.get_logger().warn("motion/move_stop 서비스 없음 (local)")
+            return
+        future = client.call_async(self._move_stop_request)
+        wait_for_future(future, timeout_sec=2.0, node=self._node)
+
+    def user_stop_recover(self, task: str) -> None:
+        """정지 후 홈 복귀 (cancel 플래그 해제 후 recover)."""
+        try:
+            self.gripper.open()
+        except Exception as exc:
+            self._node.get_logger().warn(f"정지 시 그리퍼 열기 실패: {exc}")
+        self.clear_cancel()
+        self.publish_status(task, "user_stop", "running", "홈 복귀 중")
+        try:
+            self.recover_pose(task)
+            self.publish_status(task, "user_stop", "recovered", "정지 후 홈 복귀 완료")
+        except Exception as exc:
+            self._node.get_logger().error(f"정지 후 홈 복귀 실패: {exc}")
+            self.publish_status(
+                task,
+                "user_stop",
+                "error",
+                f"홈 복귀 실패: {exc}",
+                extra={"code": "RECOVERY_FAILED"},
+            )
 
     def _check_cancel(self) -> None:
         if self._cancel.is_set():
@@ -112,6 +161,34 @@ class RobotMotion:
     ) -> None:
         pose = self.get_current_tcp_pose()
         pose[2] = float(z_mm)
+        self.move_task_pose(pose, label, task, vel=vel, acc=acc)
+
+    def get_current_joint(self) -> list[float]:
+        """현재 조인트 각도 [j1..j6] (deg)."""
+        from cobot1.motion.dsr_imports import import_dsr_api
+
+        api = import_dsr_api()
+        pos, _sol = api["get_current_posj"]()
+        if pos is None or pos == 0:
+            raise MotionError(
+                "조인트 위치를 읽을 수 없습니다.",
+                code="JOINT_READ_FAILED",
+                user_message="로봇 조인트 조회에 실패했습니다.",
+            )
+        raw = list(pos)[:6]
+        return [float(v) for v in raw]
+
+    def move_base_x_delta(
+        self,
+        dx_mm: float,
+        label: str,
+        task: str,
+        vel: Sequence[float] | None = None,
+        acc: Sequence[float] | None = None,
+    ) -> None:
+        """베이스 좌표계 X만 이동 (수평, Y·Z·자세 유지)."""
+        pose = self.get_current_tcp_pose()
+        pose[0] += float(dx_mm)
         self.move_task_pose(pose, label, task, vel=vel, acc=acc)
 
     def move_base_z_delta(
@@ -391,6 +468,8 @@ class RobotMotion:
                 self._safety.check_or_raise()
                 self._check_cancel()
                 if self.check_motion() != 0:
+                    if self._cancel.is_set():
+                        raise TaskCancelled("사용자가 작업을 중단했습니다.")
                     raise MotionError(
                         f"{label}: 모션 완료 확인 실패",
                         code="MOTION_INCOMPLETE",
@@ -400,6 +479,8 @@ class RobotMotion:
             except (SafetyViolation, TaskCancelled):
                 raise
             except Exception as exc:
+                if self._cancel.is_set():
+                    raise TaskCancelled("사용자가 작업을 중단했습니다.") from exc
                 last_error = exc
                 self._node.get_logger().warn(
                     f"{label} 실패 (시도 {attempt + 1}/{self._retry + 1}): {exc}"
@@ -568,6 +649,7 @@ class RobotMotion:
         except Exception as exc:
             self._node.get_logger().warn(f"그리퍼 열기 실패: {exc}")
 
+        self.clear_cancel()
         try:
             self.recover_pose(task)
             self.publish_status(task, "safe_abort", "recovered", "안전 복귀 완료")
@@ -601,7 +683,7 @@ class RobotMotion:
                         exc.user_message,
                         extra={"code": exc.code},
                     )
-                    self.safe_abort(task, exc.user_message, exc.code)
+                    self.user_stop_recover(task)
                     raise
                 except SafetyViolation as exc:
                     self.publish_status(

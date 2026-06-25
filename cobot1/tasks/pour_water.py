@@ -48,7 +48,7 @@ class PourWaterTask(BaseTask):
 
         body_grasp_joint = list(cfg.get(
             "body_grasp_joint",
-            [-42.44, 44.58, 101.47, 52.00, 112.40, -63.81],
+            [-41.99, 44.05, 101.32, 52.69, 112.6, -63.1],
         ))
         cup_side_joint = list(cfg.get(
             "cup_side_joint",
@@ -204,9 +204,24 @@ class PourWaterTask(BaseTask):
             _move_j6_delta(0.0, "untilt_slow", pour_jvel, pour_jacc)
 
         def _carry_back() -> None:
-            _carry_to_joint(
-                body_grasp_joint, "carry_back",
-                keep_orientation=True,
+            """컵홀더 복귀: body_grasp XY 정렬 후 Z만 수직 하강."""
+            tcp = _fkin_tcp(body_grasp_joint)
+            cur = motion.get_current_tcp_pose()
+            travel_z = max(cur[2], tcp[2]) + lift
+            motion.move_vertical_to_z(
+                travel_z, cur, "carry_back_lift", task,
+                vel=fast_vel, acc=fast_acc,
+            )
+            motion.move_task_pose(
+                [tcp[0], tcp[1], travel_z, tcp[3], tcp[4], tcp[5]],
+                "carry_back_travel", task,
+                vel=fast_vel, acc=fast_acc,
+            )
+            motion.move_vertical_to_z(
+                tcp[2],
+                [tcp[0], tcp[1], travel_z, tcp[3], tcp[4], tcp[5]],
+                "carry_back_lower", task,
+                vel=grasp_vel, acc=grasp_acc,
             )
 
         def _retract_and_home() -> None:

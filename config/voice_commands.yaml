@@ -1,0 +1,27 @@
+# 음성 명령 고정 문장 (프로토타입: 완전 일치만)
+commands:
+  - id: prepare_medication
+    phrase: "약 준비해 줘"
+    action: run_chain
+    task_ids:
+      - open_bottle
+      - pour_water
+      - close_bottle
+      - pick_place_pill
+  - id: stop
+    phrase: "멈춰"
+    action: stop
+
+speech:
+  prepare_medication:
+    ack: "네, 약 준비해 드리겠습니다."
+    complete: "약 준비가 끝났어요."
+  stop:
+    ack: "네, 멈추겠습니다."
+  global:
+    not_understood: "잘 못 들었어요. 다시 말씀해 주세요."
+    busy: "지금 다른 일을 하고 있어요. 잠시만 기다려 주세요."
+    error: "작업 중 문제가 생겼어요."
+
+labels:
+  prepare_medication: "약 준비하기"

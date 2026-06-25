@@ -39,7 +39,7 @@ class OpenBottleTask(BaseTask):
         pos_cupholder_cap = list(wp["cupholder_cap_grasp"])  # pos2
         pos_open_start = list(wp["cupholder_cap_open_start"])  # 개봉 직전 TCP
         lift = float(wp.get("lift_clearance_mm", 120.0))
-        holder_place_extra = float(cfg.get("holder_place_extra_mm", 11.0))
+        holder_place_extra = float(cfg.get("holder_place_extra_mm", 6.0))
         regrasp_lift = float(cfg.get("regrasp_lift_mm", 100.0))
 
         cap_lift      = float(cfg.get("cap_lift_mm", 30.0))

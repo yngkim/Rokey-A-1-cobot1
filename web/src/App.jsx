@@ -1,8 +1,11 @@
-import { useState } from 'react'
-import { runTask } from './api/client'
+import { useCallback, useRef, useState } from 'react'
+import { forceIdle, runTask } from './api/client'
 import SafetyAlertModal from './components/SafetyAlertModal'
 import RunningDock from './components/RunningDock'
+import VoiceButton from './components/VoiceButton'
 import { useRobotApp } from './hooks/useRobotApp'
+import { useRobotSpeech } from './hooks/useRobotSpeech'
+import { useVoiceInput } from './hooks/useVoiceInput'
 
 function TaskButton({ task, disabled, hint, onRun }) {
   const [loading, setLoading] = useState(false)
@@ -38,6 +41,10 @@ function connectionLabel(apiOnline, robotReady) {
 }
 
 export default function App() {
+  const speech = useRobotSpeech()
+  const speechRef = useRef(speech)
+  speechRef.current = speech
+
   const {
     tasks,
     apiOnline,
@@ -55,10 +62,72 @@ export default function App() {
     handleReset,
     clearAlert,
     markTaskStarted,
-  } = useRobotApp()
+    markVoiceChainStarted,
+  } = useRobotApp(speechRef)
+
+  const handleVoiceResult = useCallback(
+    async (result) => {
+      if (result.speech) {
+        await speech.speakFromResponse(result.speech)
+      }
+
+      if (!result.matched) {
+        showToast('인식된 명령이 없습니다', 'info')
+        return
+      }
+
+      if (result.code === 'STARTED') {
+        if (result.command_id === 'prepare_medication') {
+          markVoiceChainStarted('prepare_medication')
+        } else {
+          markTaskStarted(result.command_id || '')
+        }
+        showToast(result.message || '작업을 시작했습니다')
+        refreshHealth()
+        return
+      }
+
+      if (result.code === 'BUSY') {
+        showToast(result.message || '다른 작업 실행 중', 'info')
+        return
+      }
+
+      if (result.code === 'NOT_MATCHED') {
+        return
+      }
+
+      if (!result.success) {
+        showToast(result.message || '명령을 실행하지 못했습니다', 'error')
+      }
+    },
+    [
+      markTaskStarted,
+      markVoiceChainStarted,
+      refreshHealth,
+      showToast,
+      speech,
+    ],
+  )
+
+  const handleVoiceError = useCallback(
+    (message) => {
+      showToast(message, 'error')
+    },
+    [showToast],
+  )
+
+  const voice = useVoiceInput({
+    enabled: apiOnline && robotReady,
+    busy,
+    isSpeaking: speech.isSpeaking,
+    onResult: handleVoiceResult,
+    onError: handleVoiceError,
+  })
 
   const conn = connectionLabel(apiOnline, robotReady)
   const canRun = apiOnline && robotReady && !busy
+  const voiceDisabled =
+    !apiOnline || !robotReady || busy || voice.isProcessing || speech.isSpeaking()
 
   const disabledHint = !apiOnline
     ? 'care_web_api를 실행하세요 (포트 8080)'
@@ -72,12 +141,26 @@ export default function App() {
     try {
       const result = await runTask(taskId)
       if (result.success) {
-        markTaskStarted(taskId)
+        if (taskId === 'prepare_medication' || result.chain) {
+          markVoiceChainStarted('prepare_medication')
+        } else {
+          markTaskStarted(taskId)
+        }
         showToast(result.message || '작업을 시작했습니다')
         refreshHealth()
       } else {
         showToast(result.message || '실행 실패', 'error')
       }
+    } catch (err) {
+      showToast(err.message, 'error')
+    }
+  }
+
+  const handleForceIdle = async () => {
+    try {
+      await forceIdle()
+      showToast('화면 잠금을 해제했습니다', 'info')
+      refreshHealth()
     } catch (err) {
       showToast(err.message, 'error')
     }
@@ -112,6 +195,15 @@ export default function App() {
       {alert && (
         <SafetyAlertModal alert={alert} onClose={clearAlert} onReset={handleReset} resetting={resetting} />
       )}
+
+      <VoiceButton
+        supported={voice.supported}
+        disabled={voiceDisabled}
+        isListening={voice.isListening}
+        isProcessing={voice.isProcessing}
+        interimText={voice.interimText}
+        onPress={voice.startListening}
+      />
 
       <main className={`app-main ${busy ? 'dimmed' : ''}`}>
         {groups.map((group) => (
@@ -151,11 +243,16 @@ export default function App() {
       </main>
 
       <footer className="status-bar">
-        {!busy && <span>버튼을 눌러 기능을 실행하세요</span>}
-        {busy && status && (
-          <span className="status-muted">
-            [{status.task}] {status.step}
-          </span>
+        {!busy && <span>버튼 또는 음성으로 기능을 실행하세요</span>}
+        {busy && (
+          <>
+            <span className="status-muted">
+              {status ? `[${status.task}] ${status.step}` : '실행 중…'}
+            </span>
+            <button type="button" className="force-idle-btn" onClick={handleForceIdle}>
+              화면 잠금 해제
+            </button>
+          </>
         )}
       </footer>
 

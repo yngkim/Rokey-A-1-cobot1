@@ -19,8 +19,8 @@ gripper:
   modbus_port: 502
   changer_addr: 65
   force: 400
-  settle_time_sec: 0.8
-  motion_timeout_sec: 6.0
+  settle_time_sec: 2.0
+  motion_timeout_sec: 8.0
   joint_states_topic: /gripper_joint_states
   finger_joint_name: rg2_finger_joint
   open_joint_position: -0.558505
@@ -35,6 +35,19 @@ safety:
     external_force: "외력이 감지되어 동작을 중단했습니다. 환자·물체 접촉 여부를 확인해 주세요."
     unsafe_robot_state: "로봇이 안전 정지 상태입니다. 티칭 팬던트 알람을 확인해 주세요."
     motion_failed: "동작 실행에 실패했습니다. 로봇 상태를 확인해 주세요."
+
+# 물병 작업 공유 포즈 (TCP posx [x,y,z,rx,ry,rz], mm/deg) — open/pour/close 공용
+# 픽앤플레이스는 항상 베이스 Z 상승 → XY 수평 → 베이스 Z 하강, 이송 중 자세(rx,ry,rz) 고정
+water_poses:
+  water_cap_grasp:      [214.21, -227.51, 415.81, 167.66, 179.83, -170.72]  # pos1 초기 물통, 뚜껑 파지
+  cupholder_cap_grasp:  [370.53, 9.49, 427.25, 8.57, -178.27, 29.68]        # pos2 컵홀더, 뚜껑 파지=놓기=개폐
+  cupholder_cap_open_start:  [369.46, 10.81, 431.21, 72.00, -179.72, 81.69]  # 개봉 직전 TCP
+  cupholder_cap_close_start: [369.46, 5.81, 431.21, 72.00, -179.72, 81.69]   # 조임 직전 TCP
+  cupholder_body_grasp: [371.76, 208.58, 141.88, 88.74, -96.89, 86.74]      # pos3 몸통(측면) 파지
+  cup_pour_upright:     [621.23, 223.91, 254.59, 89.72, -90.03, 94.44]      # pos4 컵 옆, 세운 상태
+  cup_pour_tilt:        [629.58, 219.77, 237.85, 92.95, -98.99, 37.36]      # pos5 최대 기울임
+  lift_clearance_mm: 120.0   # 픽앤플레이스 시 베이스 Z 상승 여유
+  bottle_height_offset_mm: 0.0  # 물병 높이 Z 보정(기존 병 기준 0)
 
 # 1. 페트병 뚜껑 열기 (툴 +Z 상대 이동 방식)
 open_bottle:
@@ -67,6 +80,8 @@ open_bottle:
   # cap_place_floor_z_mm: 뚜껑 잡은 그리퍼가 바닥에 닿는 Z(mm). 이 값 이하로 절대 내려가지 않음
   cap_place_floor_z_mm: 237.0
   cap_place_approach_z_mm: 50.0
+  holder_place_extra_mm: 11.0  # 컵홀더 안착 시 티칭 Z 보다 더 하강(기본 5mm + 추가 6mm)
+  regrasp_lift_mm: 100.0       # 병 놓은 뒤 재파지·개봉 전 수직 상승(약 10cm)
 
 # 1-2. 페트병 뚜껑 닫기 (open_bottle 역순) — 뚜껑이 바닥에 놓여 있다고 가정
 # open_bottle 과 동일한 좌표/파라미터를 사용해야 같은 위치에서 뚜껑을 집는다.
@@ -83,6 +98,9 @@ close_bottle:
   twist_steps: 8
   twist_rise_mm: 5.0        # 나사산 피치 (닫기 시 동일 거리만큼 하강)
   grip_force: 100.0         # 바닥 뚜껑 약파지 힘(낮을수록 뚜껑 변형↓, 최대 ~400)
+  grasp_settle_sec: 2.0     # 약파지 후 상승 전 대기(그리퍼 완전히 닫힐 때까지, RG2 피드백 없음)
+  regrasp_force: 400.0      # 닫은 뒤 물병 이송 전 뚜껑 강파지 힘(미끄럼 방지)
+  drop_clearance_mm: 10.0   # 병 입구 위 떨어뜨릴 높이(약 1cm)
   floor_pick_extra_mm: 5.0  # 바닥 뚜껑 파지 시 floor_z 보다 더 내려가는 깊이(약 0.5cm)
   cap_place_floor_z_mm: 237.0
   cap_place_approach_z_mm: 50.0
@@ -92,16 +110,33 @@ go_home:
   open_gripper: true
   retreat_z_mm: 80
 
-# 2. 물 따르기
+# 2. 물 따르기 (open_bottle 직후, 물병이 컵홀더에 개봉된 채 꽂혀 있다고 가정)
+# 포즈는 조인트 각도(deg). 컵/복귀 이송은 fkin TCP + Z↑→XY→Z↓
 pour_water:
-  bottle_pose: [400.0, -200.0, 360.0, 180.0, 0.0, 90.0]
-  cup_pose: [400.0, -80.0, 300.0, 180.0, 0.0, 90.0]
-  grasp_offset_z_mm: 45
-  pour_height_above_cup_mm: 130
-  pour_tilt_deg: 50.0
+  body_grasp_joint: [-42.44, 44.58, 101.47, 52.00, 112.40, -63.81]   # 컵홀더 몸통 파지
+  cup_side_joint:   [19.84, 35.26, 116.6, 106.22, 81.39, -63.12]     # 컵 옆 세운 상태
+  # pour_tilt_joint: 참고용 티칭값 (코드 미사용 — J6 상대 회전 pour_tilt_delta_j6_deg 사용)
+  pour_tilt_delta_j6_deg: -80.0  # cup_side J6 기준 최대 기울임(부호·크기 현장 튜닝)
+  pour_fast_zone_deg: 30.0       # 입구 구간(0↔±30, ±80↔±50) 빠른 기울임 각도
+  pour_joint_vel: 8.0            # 느린 구간 속도
+  pour_joint_acc: 8.0
+  pour_fast_joint_vel: 30.0      # 빠른 구간 속도
+  pour_fast_joint_acc: 30.0
+  approach_joint_vel: 10.0
+  approach_joint_acc: 10.0
+  grasp_vel: [15, 10]
+  grasp_acc: [30, 15]
+  fast_vel: [80, 60]
+  fast_acc: [200, 150]
+  fast_joint_vel: 60.0
+  fast_joint_acc: 60.0
+  body_grip_force: 100.0              # 초기 몸통 파지 힘 (~10N, RG2 0.1N 단위)
+  body_grip_width_units: 0            # 목표 너비(0.01mm). 0=완전 닫힘
+  body_grip_force_after_pour: 80.0    # 따른 뒤 힘만 낮춤 (~8N). width=0 유지, 벌리지 않음
+  body_grip_relax_wait_sec: 1.0       # 힘 변경 후 대기(초)
+  body_grasp_settle_sec: 4.5            # 초기 파지 최소 대기(초) + busy 해제
   pour_duration_sec: 3.0
   pre_pour_pause_sec: 0.5
-  return_bottle: true
 
 # 3. 알약 서랍 → 옮기기
 pick_place_pill:

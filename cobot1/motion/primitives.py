@@ -158,6 +158,59 @@ class RobotMotion:
         ]
         self.move_task_pose(target, label, task, vel=vel, acc=acc)
 
+    def approach_from_above(
+        self,
+        target: Sequence[float],
+        label: str,
+        task: str,
+        lift_mm: float,
+        vel: Sequence[float] | None = None,
+        acc: Sequence[float] | None = None,
+        descend_vel: Sequence[float] | None = None,
+        descend_acc: Sequence[float] | None = None,
+    ) -> None:
+        """빈 그리퍼로 target(파지 포즈) 위에서 수직 하강 접근.
+
+        target 자세(rx,ry,rz)를 유지한 채, 충분히 높은 지점으로 이동 후
+        베이스 Z만 수직 하강 → 옆 물체와 대각선 충돌 방지.
+        """
+        tgt = [float(v) for v in target[:6]]
+        cur = self.get_current_tcp_pose()
+        travel_z = max(cur[2], tgt[2]) + float(lift_mm)
+        above = [tgt[0], tgt[1], travel_z, tgt[3], tgt[4], tgt[5]]
+        self.move_task_pose(above, f"{label}_above", task, vel=vel, acc=acc)
+        self.move_task_pose(tgt, f"{label}_descend", task,
+                            vel=descend_vel or vel, acc=descend_acc or acc)
+
+    def carry_to_pose(
+        self,
+        target: Sequence[float],
+        label: str,
+        task: str,
+        lift_mm: float,
+        vel: Sequence[float] | None = None,
+        acc: Sequence[float] | None = None,
+        lower_vel: Sequence[float] | None = None,
+        lower_acc: Sequence[float] | None = None,
+        keep_orientation: bool = True,
+    ) -> None:
+        """물건을 든 채 target 위치로 이송: 베이스 Z 상승 → XY 수평 → 베이스 Z 하강.
+
+        이송 중 자세를 고정(keep_orientation=True 시 현재 자세 유지)해 내용물을
+        흘리지 않는다. lift_mm 만큼 두 위치 중 높은 곳보다 더 올려 수평 이동한다.
+        """
+        tgt = [float(v) for v in target[:6]]
+        cur = self.get_current_tcp_pose()
+        ori = cur[3:6] if keep_orientation else tgt[3:6]
+        travel_z = max(cur[2], tgt[2]) + float(lift_mm)
+        self.move_task_pose([cur[0], cur[1], travel_z, *ori],
+                            f"{label}_lift", task, vel=vel, acc=acc)
+        self.move_task_pose([tgt[0], tgt[1], travel_z, *ori],
+                            f"{label}_travel", task, vel=vel, acc=acc)
+        self.move_task_pose([tgt[0], tgt[1], tgt[2], *ori],
+                            f"{label}_lower", task,
+                            vel=lower_vel or vel, acc=lower_acc or acc)
+
     def probe_down_until_contact(
         self,
         task: str,

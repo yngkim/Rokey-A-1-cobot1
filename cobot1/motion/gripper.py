@@ -100,14 +100,20 @@ class Gripper:
             return float(self._cfg.get("closed_joint_position", DEFAULT_CLOSED_POSITION))
         return float(self._cfg.get("open_joint_position", DEFAULT_OPEN_POSITION))
 
-    def _wait_for_joint_motion(self, closed: bool) -> None:
+    def _wait_for_joint_motion(
+        self, closed: bool, wait_sec: float | None = None,
+    ) -> None:
         """sendCommand는 즉시 반환하므로 조인트 피드백까지 대기."""
+        settle = float(wait_sec) if wait_sec is not None else self._settle
         if self._driver == DRIVER_ONROBOT_RG2:
-            # Modbus 직접 제어: 별도 조인트 피드백 없음 → settle 시간만 대기
-            time.sleep(self._settle)
+            timeout = float(self._cfg.get("motion_timeout_sec", 6.0))
+            self._rg2_client().wait_until_idle(
+                timeout_sec=timeout,
+                min_wait_sec=settle,
+            )
             return
         if self._driver not in (DRIVER_ONROBOT_ROS,):
-            time.sleep(self._settle)
+            time.sleep(settle)
             return
 
         if self._node is None:
@@ -248,15 +254,24 @@ class Gripper:
 
         self._closed = True
 
-    def grip(self, force: float | None = None, width_units: int = 0) -> None:
+    def grip(
+        self,
+        force: float | None = None,
+        width_units: int = 0,
+        wait_sec: float | None = None,
+    ) -> None:
         """지정 힘/너비로 약하게 파지 (뚜껑 변형 방지 등).
 
         onrobot_rg2(Modbus) 외 드라이버는 일반 close() 로 대체한다.
+        wait_sec: Modbus 등 피드백 없는 드라이버의 닫힘 대기 시간(초).
         """
         if self._driver == DRIVER_ONROBOT_RG2:
             self._rg2_client().grip(force, width_units)
-            self._log(f"[gripper:rg2] 약파지 (force={force}, width_units={width_units})")
-            self._wait_for_joint_motion(closed=True)
+            self._log(
+                f"[gripper:rg2] 약파지 (force={force}, width_units={width_units}, "
+                f"wait={wait_sec if wait_sec is not None else self._settle}s)"
+            )
+            self._wait_for_joint_motion(closed=True, wait_sec=wait_sec)
             self._closed = True
             return
         self.close()

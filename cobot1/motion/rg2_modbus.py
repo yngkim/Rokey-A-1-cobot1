@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import threading
+import time
 from typing import Any
 
 from cobot1.motion.exceptions import MotionError
@@ -17,6 +18,7 @@ _DY = -0.0144
 _DEFAULT_MAX_FORCE = 400
 _DEFAULT_MAX_WIDTH = 1100
 _RCTR_MOVE = 16
+_STATUS_REGISTER = 268
 
 
 def _width_to_joint(width_m: float) -> float:
@@ -104,3 +106,54 @@ class Rg2ModbusClient:
         """지정 힘/너비로 파지 (약하게 잡기 등). force None 이면 최대 힘."""
         f = int(force) if force is not None else self._max_force
         self._write_command(f, int(width_units), _RCTR_MOVE)
+
+    def is_busy(self) -> bool:
+        """gsta bit0 — 1 이면 그리퍼 동작 중."""
+        self.connect()
+        with self._lock:
+            assert self._client is not None
+            result = self._client.read_holding_registers(
+                address=_STATUS_REGISTER,
+                count=1,
+                device_id=self._changer_addr,
+            )
+        if result.isError():
+            raise MotionError(
+                f"RG2 상태 읽기 실패: {result}",
+                code="GRIPPER_STATUS_READ_FAILED",
+            )
+        return bool(int(result.registers[0]) & 0x01)
+
+    def wait_until_idle(
+        self,
+        timeout_sec: float = 6.0,
+        min_wait_sec: float = 0.0,
+    ) -> None:
+        """닫힘/열림 완료까지 busy 해제 대기. min_wait_sec 는 최소 보장 대기."""
+        if min_wait_sec > 0:
+            time.sleep(min_wait_sec)
+
+        deadline = time.monotonic() + float(timeout_sec)
+        while time.monotonic() < deadline:
+            try:
+                busy = self.is_busy()
+            except MotionError:
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    time.sleep(remaining)
+                return
+            if not busy:
+                time.sleep(0.1)
+                try:
+                    still_busy = self.is_busy()
+                except MotionError:
+                    return
+                if not still_busy:
+                    return
+            time.sleep(0.05)
+
+        raise MotionError(
+            f"RG2 동작 시간 초과 ({timeout_sec:.1f}s)",
+            code="GRIPPER_MOTION_TIMEOUT",
+            user_message="그리퍼가 제한 시간 안에 닫히지 않았습니다.",
+        )

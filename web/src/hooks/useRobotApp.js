@@ -48,6 +48,7 @@ export function useRobotApp(speechRef) {
   const [apiOnline, setApiOnline] = useState(false)
   const [robotReady, setRobotReady] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [maintenance, setMaintenance] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [resetting, setResetting] = useState(false)
   const [activeTaskId, setActiveTaskId] = useState('')
@@ -96,9 +97,14 @@ export function useRobotApp(speechRef) {
   const applySync = useCallback((data) => {
     if (!data) return
     setBusy(!!data.busy)
+    setMaintenance(!!data.maintenance)
     setActiveTaskId(data.current_task || '')
     if (data.last_status) setStatus(data.last_status)
-    if (!data.busy) setStopping(false)
+    if (!data.busy) {
+      setStopping(false)
+      setResetting(false)
+      voiceChainRef.current = false
+    }
   }, [])
 
   const updateTaskLabel = useCallback((taskId, labelFromHealth) => {
@@ -115,6 +121,7 @@ export function useRobotApp(speechRef) {
         setApiOnline(!!h.api_ok)
         setRobotReady(!!h.robot_ready)
         setBusy(!!h.busy)
+        setMaintenance(!!h.maintenance)
         setActiveTaskId(h.current_task || '')
         updateTaskLabel(h.current_task || '', h.current_task_label || '')
         if (!h.busy) {
@@ -185,10 +192,16 @@ export function useRobotApp(speechRef) {
         return
       }
 
+      if (msg.type === 'maintenance') {
+        setMaintenance(!!msg.data?.enabled)
+        return
+      }
+
       if (msg.type === 'task_complete') {
         const data = msg.data || {}
         voiceChainRef.current = false
         clearBusy()
+        refreshHealth()
         if (data.forced_idle) {
           showToast('화면 잠금을 해제했습니다', 'info')
           return
@@ -216,18 +229,12 @@ export function useRobotApp(speechRef) {
         const step = msg.data?.step
         if (msg.data?.task) setActiveTaskId(msg.data.task)
 
-        if (state === 'running') {
-          setBusy(true)
-          if (step !== 'user_stop') {
-            setStopping(false)
-          }
-        }
-
         if (shouldClearBusy(msg.data, voiceChainRef.current)) {
           if (state === 'stopped' || state === 'error' || step === 'user_stop') {
             voiceChainRef.current = false
           }
           clearBusy()
+          refreshHealth()
           if (step === 'finish' && state === 'done') {
             showToast('작업이 완료되었습니다')
           }
@@ -277,6 +284,7 @@ export function useRobotApp(speechRef) {
     apiOnline,
     robotReady,
     busy,
+    maintenance,
     stopping,
     activeTaskId,
     activeTaskLabel,

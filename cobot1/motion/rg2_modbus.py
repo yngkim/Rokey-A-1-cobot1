@@ -19,10 +19,14 @@ _DEFAULT_MAX_FORCE = 400
 _DEFAULT_MAX_WIDTH = 1100
 _RCTR_MOVE = 16
 _STATUS_REGISTER = 268
+# cobot1 시나리오 width_units: 0.01mm/단위 (5000=50mm). OnRobot rgwd: 값/10000=m
+_COBOT_WIDTH_TO_RGWD = 10
 
 
 def _width_to_joint(width_m: float) -> float:
-    return math.acos(((width_m / 2) - _DY - _L1 * math.cos(_THETA1)) / _L3) - _THETA3
+    arg = ((width_m / 2) - _DY - _L1 * math.cos(_THETA1)) / _L3
+    arg = max(-1.0, min(1.0, arg))
+    return math.acos(arg) - _THETA3
 
 
 def _joint_to_width(joint_angle: float) -> float:
@@ -103,9 +107,13 @@ class Rg2ModbusClient:
         self._write_command(self._max_force, 0, _RCTR_MOVE)
 
     def grip(self, force: int | None = None, width_units: int = 0) -> None:
-        """지정 힘/너비로 파지 (약하게 잡기 등). force None 이면 최대 힘."""
+        """지정 힘/너비로 파지 (약하게 잡기 등). force None 이면 최대 힘.
+
+        width_units 는 cobot1 시나리오 단위(0.01mm, 5000=50mm).
+        """
         f = int(force) if force is not None else self._max_force
-        self._write_command(f, int(width_units), _RCTR_MOVE)
+        rgwd = int(width_units) // _COBOT_WIDTH_TO_RGWD if width_units > 0 else 0
+        self._write_command(f, rgwd, _RCTR_MOVE)
 
     def is_busy(self) -> bool:
         """gsta bit0 — 1 이면 그리퍼 동작 중."""

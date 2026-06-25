@@ -515,8 +515,66 @@ class RobotMotion:
         self._run_with_retry(label, _move)
         self.publish_status(task, label, "done")
 
-    def go_home(self, task: str = "motion") -> None:
-        self.movej_joint(self._cfg["home_joint"], "go_home", task)
+    def move_joint_via_lift(
+        self,
+        joints: Sequence[float],
+        label: str,
+        task: str,
+        cfg: dict | None = None,
+    ) -> None:
+        """목표 조인트로 Z 상승 → XY 이동 → Z 하강 (장애물 회피)."""
+        from cobot1.motion.dsr_imports import import_dsr_api
+
+        opts = cfg or {}
+        lift_mm = float(
+            opts.get("lift_clearance_mm", self._cfg.get("home_lift_clearance_mm", 150.0))
+        )
+        carry_vel = list(opts.get("carry_vel", self._cfg.get("home_carry_vel", self._cfg["task_vel"])))
+        carry_acc = list(opts.get("carry_acc", self._cfg.get("home_carry_acc", self._cfg["task_acc"])))
+        descend_vel = list(
+            opts.get("descend_vel", self._cfg.get("home_descend_vel", [15, 10]))
+        )
+        descend_acc = list(
+            opts.get("descend_acc", self._cfg.get("home_descend_acc", [30, 20]))
+        )
+
+        tcp = [float(v) for v in import_dsr_api()["fkin"](list(joints))]
+        cur = self.get_current_tcp_pose()
+        travel_z = max(cur[2], tcp[2]) + lift_mm
+
+        self.move_vertical_to_z(
+            travel_z, cur, f"{label}_lift", task, vel=carry_vel, acc=carry_acc
+        )
+        self.move_task_pose(
+            [tcp[0], tcp[1], travel_z, tcp[3], tcp[4], tcp[5]],
+            f"{label}_travel",
+            task,
+            vel=carry_vel,
+            acc=carry_acc,
+        )
+        self.move_task_pose(
+            tcp, f"{label}_descend", task, vel=descend_vel, acc=descend_acc
+        )
+
+    def go_home(
+        self,
+        task: str = "motion",
+        *,
+        label: str = "go_home",
+        lift_mm: float | None = None,
+        joint_vel: float | None = None,
+        joint_acc: float | None = None,
+        cfg: dict | None = None,
+    ) -> None:
+        """현재 위치에서 Z 상승 후 홈 조인트로 복귀 (장애물 회피)."""
+        home_joint = self._cfg["home_joint"]
+        lift_cfg = dict(cfg or {})
+        if lift_mm is not None:
+            lift_cfg["lift_clearance_mm"] = lift_mm
+        self.move_joint_via_lift(home_joint, label, task, lift_cfg)
+        v = joint_vel if joint_vel is not None else self._cfg["joint_vel"]
+        a = joint_acc if joint_acc is not None else self._cfg["joint_acc"]
+        self.movej_joint(home_joint, f"{label}_align", task, vel=v, acc=a)
 
     def recover_pose(self, task: str = "motion") -> None:
         if self._recovery_joint:

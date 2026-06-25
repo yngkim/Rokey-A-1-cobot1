@@ -29,6 +29,23 @@ body {
   padding: 12px;
 }
 
+/* 관리자 페이지: 케어 UI 폰 레이아웃(420px) 해제 */
+html.admin-mode,
+body.admin-mode {
+  display: block !important;
+  min-height: 100vh;
+  width: 100%;
+  padding: 0 !important;
+  margin: 0;
+  background: #0f1419 !important;
+}
+
+body.admin-mode #root {
+  width: 100% !important;
+  max-width: none !important;
+  min-height: 100vh;
+}
+
 #root {
   width: 100%;
   max-width: 420px;
@@ -507,6 +524,18 @@ body {
   justify-content: space-between;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.admin-footer-link {
+  margin-left: auto;
+  font-size: 0.78rem;
+  color: #6b7280;
+  text-decoration: none;
+}
+
+.admin-footer-link:hover {
+  color: #374151;
+  text-decoration: underline;
 }
 
 .force-idle-btn {

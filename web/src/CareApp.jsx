@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { forceIdle, runTask } from './api/client'
 import SafetyAlertModal from './components/SafetyAlertModal'
 import RunningDock from './components/RunningDock'
@@ -40,7 +41,7 @@ function connectionLabel(apiOnline, robotReady) {
   return { text: '연결됨', className: 'on' }
 }
 
-export default function App() {
+export default function CareApp() {
   const speech = useRobotSpeech()
   const speechRef = useRef(speech)
   speechRef.current = speech
@@ -50,6 +51,7 @@ export default function App() {
     apiOnline,
     robotReady,
     busy,
+    maintenance,
     stopping,
     resetting,
     activeTaskLabel,
@@ -87,7 +89,7 @@ export default function App() {
         return
       }
 
-      if (result.code === 'BUSY') {
+      if (result.code === 'BUSY' || result.code === 'MAINTENANCE') {
         showToast(result.message || '다른 작업 실행 중', 'info')
         return
       }
@@ -117,7 +119,7 @@ export default function App() {
   )
 
   const voice = useVoiceInput({
-    enabled: apiOnline && robotReady,
+    enabled: apiOnline && robotReady && !maintenance,
     busy,
     isSpeaking: speech.isSpeaking,
     onResult: handleVoiceResult,
@@ -125,17 +127,19 @@ export default function App() {
   })
 
   const conn = connectionLabel(apiOnline, robotReady)
-  const canRun = apiOnline && robotReady && !busy
+  const canRun = apiOnline && robotReady && !busy && !maintenance
   const voiceDisabled =
-    !apiOnline || !robotReady || busy || voice.isProcessing || speech.isSpeaking()
+    !apiOnline || !robotReady || busy || maintenance || voice.isProcessing || speech.isSpeaking()
 
-  const disabledHint = !apiOnline
-    ? 'care_web_api를 실행하세요 (포트 8080)'
-    : !robotReady
-      ? 'bringup 실행 및 SERVO ON 후 사용 가능'
-      : busy
-        ? '다른 작업 실행 중'
-        : ''
+  const disabledHint = maintenance
+    ? '유지보수 모드 중입니다'
+    : !apiOnline
+      ? 'care_web_api를 실행하세요 (포트 8080)'
+      : !robotReady
+        ? 'bringup 실행 및 SERVO ON 후 사용 가능'
+        : busy
+          ? '다른 작업 실행 중'
+          : ''
 
   const handleRun = async (taskId) => {
     try {
@@ -150,9 +154,11 @@ export default function App() {
         refreshHealth()
       } else {
         showToast(result.message || '실행 실패', 'error')
+        refreshHealth()
       }
     } catch (err) {
       showToast(err.message, 'error')
+      refreshHealth()
     }
   }
 
@@ -186,7 +192,13 @@ export default function App() {
         </div>
       )}
 
-      {apiOnline && !robotReady && (
+      {apiOnline && maintenance && (
+        <div className="info-banner warn">
+          점검 중입니다. 잠시 후 다시 이용해 주세요.
+        </div>
+      )}
+
+      {apiOnline && !robotReady && !maintenance && (
         <div className="info-banner warn">
           로봇 bringup을 실행하고 팬던트에서 SERVO ON 하세요.
         </div>
@@ -254,6 +266,9 @@ export default function App() {
             </button>
           </>
         )}
+        <Link to="/admin" className="admin-footer-link">
+          관리자
+        </Link>
       </footer>
 
       <RunningDock

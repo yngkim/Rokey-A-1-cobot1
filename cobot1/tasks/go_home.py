@@ -12,7 +12,6 @@ class GoHomeTask(BaseTask):
         cfg = self._cfg
         motion = self._motion
         task = self.name
-        retreat = float(cfg.get("retreat_z_mm", 80))
 
         steps = []
 
@@ -24,16 +23,13 @@ class GoHomeTask(BaseTask):
             except Exception:
                 pass
 
+        def _return_home() -> None:
+            lift_mm = float(cfg.get("lift_clearance_mm", 150.0))
+            motion.go_home(task, lift_mm=lift_mm, cfg=cfg)
+
         steps.append(("release_compliance", _release_compliance))
         if cfg.get("open_gripper", True):
             steps.append(("open_gripper", motion.gripper.open))
-        if retreat > 0:
-            steps.append(
-                (
-                    "safe_retreat",
-                    lambda: motion.retreat_z(retreat, "safe_retreat", task),
-                )
-            )
-        steps.append(("go_home", lambda: motion.go_home(task)))
+        steps.append(("go_home", _return_home))
 
         motion.run_sequence(task, steps)

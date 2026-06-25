@@ -1,7 +1,7 @@
 export const DEFAULT_TASKS = [
   { id: 'prepare_medication', label: '약 준비하기', icon: '💊', group: '복약' },
-  { id: 'place_on_charger', label: '충전기에 놓기', icon: '📲', group: '스마트폰' },
-  { id: 'pick_from_charger', label: '충전기에서 가져오기', icon: '🔋', group: '스마트폰' },
+  { id: 'place_on_charger', label: '핸드폰 가져다놓기', icon: '📲', group: '스마트폰' },
+  { id: 'pick_from_charger', label: '핸드폰 가져오기', icon: '🔋', group: '스마트폰' },
   { id: 'go_home', label: '기본 위치 복귀', icon: '🏠', group: '제어' },
 ]
 

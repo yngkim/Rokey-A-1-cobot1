@@ -10,6 +10,11 @@ motion:
   pour_acc: [80, 40]
   approach_height_mm: 80
   retreat_height_mm: 100
+  home_lift_clearance_mm: 150.0
+  home_carry_vel: [25, 20]
+  home_carry_acc: [50, 40]
+  home_descend_vel: [15, 10]
+  home_descend_acc: [30, 20]
   retry_count: 2
 
 gripper:
@@ -102,13 +107,14 @@ close_bottle:
   regrasp_force: 400.0      # 닫은 뒤 물병 이송 전 뚜껑 강파지 힘(미끄럼 방지)
   drop_clearance_mm: 10.0   # 병 입구 위 떨어뜨릴 높이(약 1cm)
   floor_pick_extra_mm: 5.0  # 바닥 뚜껑 파지 시 floor_z 보다 더 내려가는 깊이(약 0.5cm)
+  water_place_offset_z_mm: 5.0  # 닫은 뒤 초기 위치 내려놓기 Z 여유(외력 감지 방지)
   cap_place_floor_z_mm: 237.0
   cap_place_approach_z_mm: 50.0
 
 # 기본 위치 복귀
 go_home:
   open_gripper: true
-  retreat_z_mm: 80
+  lift_clearance_mm: 150.0
 
 # 2. 물 따르기 (open_bottle 직후, 물병이 컵홀더에 개봉된 채 꽂혀 있다고 가정)
 # 포즈는 조인트 각도(deg). 컵/복귀 이송은 fkin TCP + Z↑→XY→Z↓
@@ -175,17 +181,40 @@ pick_place_pill:
   fast_vel: [80, 60]
   fast_acc: [200, 150]
 
-# 4. 스마트폰 무선충전기 (놓기 / 가져오기)
-place_on_charger:
-  phone_pose: [520.0, -80.0, 295.0, 180.0, 0.0, 90.0]
-  charger_pose: [380.0, -160.0, 305.0, 180.0, 0.0, 90.0]
-  approach_z_mm: 70
-  grasp_depth_mm: 6
-  place_depth_mm: 4
+# 4. 스마트폰 무선충전기 (가져오기 / 가져다놓기) — 조인트 deg, RG2 force 0.1N, width 0.01mm
+_phone_charger_common: &phone_charger_common
+  charger_approach_j5_joint: [0.0, 0.0, 90.0, 0.0, -47.67, 0.0]
+  charger_approach_j4_joint: [0.0, 0.0, 90.0, 104.24, -47.67, 0.0]
+  charger_approach_prepose_joint: [12.35, 11.61, 109.5, 104.24, -47.67, 27.85]
+  charger_grasp_joint: [-3.61, 34.37, 94.21, 89.66, -34.25, 35.38]
+  user_handoff_joint: [30.91, 24.51, 88.49, 17.75, 5.03, -111.1]
+  grip_force: 300              # 30N (0.1N 단위)
+  grip_settle_sec: 3.0
+  nudge_force_threshold: 15.0
+  nudge_hold_sec: 0.3
+  nudge_timeout_sec: 120.0
+  compliance_stiffness: [80, 80, 80, 40, 40, 40]
+  compliance_ramp_sec: 0.3
+  home_joint_vel: 12.0
+  home_joint_acc: 12.0
+  approach_joint_vel: 12.0
+  approach_joint_acc: 12.0
+  charger_grasp_approach_joint_vel: 5.0   # 준비포즈 → 핸드폰 앞 (느림)
+  charger_grasp_approach_joint_acc: 5.0
+  carry_joint_vel: 10.0
+  carry_joint_acc: 10.0
+  return_home_joint_vel: 8.0
+  return_home_joint_acc: 8.0
+  lift_clearance_mm: 150.0
+  post_grasp_lift_mm: 200.0      # 거치대 파지 후 수직 상승 (mm)
+  carry_lift_clearance_mm: 200.0 # 파지 후 이송 시 Z 회피 높이
+  carry_vel: [20, 15]
+  carry_acc: [40, 30]
+  descend_vel: [12, 8]
+  descend_acc: [24, 16]
 
 pick_from_charger:
-  phone_pose: [520.0, -80.0, 295.0, 180.0, 0.0, 90.0]
-  charger_pose: [380.0, -160.0, 305.0, 180.0, 0.0, 90.0]
-  approach_z_mm: 70
-  grasp_depth_mm: 4
-  place_depth_mm: 6
+  <<: *phone_charger_common
+
+place_on_charger:
+  <<: *phone_charger_common

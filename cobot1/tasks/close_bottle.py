@@ -48,6 +48,8 @@ class CloseBottleTask(BaseTask):
 
         floor_z          = float(cfg.get("cap_place_floor_z_mm", 237.0))
         floor_pick_extra = float(cfg.get("floor_pick_extra_mm", 5.0))
+        water_place_z    = float(cfg.get("water_place_offset_z_mm", 5.0))
+        place_water_cap  = offset_pose_z(pos_water_cap, water_place_z)
         twist_angle      = float(cfg["twist_angle_deg"])
         twist_steps      = int(cfg["twist_steps"])
         twist_rise       = float(cfg.get("twist_rise_mm", 0.0))
@@ -197,7 +199,7 @@ class CloseBottleTask(BaseTask):
         def _carry_water_to_initial() -> None:
             """닫힌 물병을 초기 위치로 이송."""
             motion.carry_to_pose(
-                pos_water_cap, "carry_water_to_initial", task, lift,
+                place_water_cap, "carry_water_to_initial", task, lift,
                 vel=fast_vel, acc=fast_acc,
                 lower_vel=grasp_vel, lower_acc=grasp_acc,
             )

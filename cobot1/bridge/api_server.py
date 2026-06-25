@@ -13,7 +13,9 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_msgs.msg import String
 
+from cobot1.bridge.event_store import get_event_store
 from cobot1.bridge.task_session import WebTaskSession
+from cobot1.motion.safety import UNSAFE_ROBOT_STATES
 from cobot1.bridge.voice_config import load_voice_config
 from cobot1.bridge.voice_intent import (
     VoiceCommand,
@@ -27,12 +29,26 @@ from cobot1.task_runner import TASK_REGISTRY, _ensure_registry
 
 TASK_CATALOG: list[dict[str, str]] = [
     {"id": "prepare_medication", "label": "약 준비하기", "icon": "💊", "group": "복약"},
-    {"id": "place_on_charger", "label": "충전기에 놓기", "icon": "📲", "group": "스마트폰"},
-    {"id": "pick_from_charger", "label": "충전기에서 가져오기", "icon": "🔋", "group": "스마트폰"},
+    {"id": "place_on_charger", "label": "핸드폰 가져다놓기", "icon": "📲", "group": "스마트폰"},
+    {"id": "pick_from_charger", "label": "핸드폰 가져오기", "icon": "🔋", "group": "스마트폰"},
     {"id": "go_home", "label": "기본 위치 복귀", "icon": "🏠", "group": "제어"},
 ]
 
 TASK_IDS = {task["id"] for task in TASK_CATALOG}
+
+ROBOT_STATE_LABELS: dict[int, str] = {
+    -1: "UNKNOWN",
+    0: "DISCONNECTED",
+    1: "INITIALIZING",
+    2: "STANDBY",
+    3: "SAFE_OFF",
+    4: "TEACHING",
+    5: "SAFE_STOP",
+    6: "EMERGENCY_STOP",
+    7: "HOMING",
+    8: "AUTONOMOUS",
+    9: "SAFE_STOP2",
+}
 
 
 class RosBridge(Node):
@@ -51,9 +67,15 @@ class RosBridge(Node):
         self._chain_abort = False
         self._voice_command_id = ""
         self._voice_labels: dict[str, str] = load_voice_config().get("labels", {})
+        self._events = get_event_store()
+        self._maintenance_mode = False
+        self._current_run_id: str | None = None
+        self._robot_state = -1
+        self._robot_state_label = "UNKNOWN"
 
         self.create_subscription(String, "cobot1/status", self._on_status, 10)
         self.create_subscription(String, "cobot1/safety_alert", self._on_alert, 10)
+        self.create_timer(2.0, self._poll_robot_state)
 
         from dsr_msgs2.srv import SetRobotControl, SetRobotMode
 
@@ -72,6 +94,123 @@ class RosBridge(Node):
     def refresh_robot_ready(self) -> bool:
         self._robot_ready = self._robot_mode_client.wait_for_service(timeout_sec=0.5)
         return self._robot_ready
+
+    def _poll_robot_state(self) -> None:
+        if not self._robot_ready:
+            return
+        try:
+            from cobot1.motion.dsr_imports import import_dsr_api
+
+            state = int(import_dsr_api()["get_robot_state"]())
+        except Exception:
+            return
+        label = ROBOT_STATE_LABELS.get(state, UNSAFE_ROBOT_STATES.get(state, f"STATE_{state}"))
+        if state != self._robot_state:
+            self._robot_state = state
+            self._robot_state_label = label
+            self._broadcast(
+                {
+                    "type": "robot_state",
+                    "data": {"state": state, "label": label},
+                }
+            )
+
+    def _check_maintenance(self) -> dict[str, Any] | None:
+        if self._maintenance_mode:
+            return {
+                "success": False,
+                "message": "유지보수 모드 중입니다. 관리자에게 문의하세요.",
+                "code": "MAINTENANCE",
+            }
+        return None
+
+    def set_maintenance(self, enabled: bool, actor: str = "admin") -> None:
+        self._maintenance_mode = enabled
+        action = "maintenance_on" if enabled else "maintenance_off"
+        self.audit_action(action, actor=actor, detail={"enabled": enabled})
+        self._broadcast(
+            {"type": "maintenance", "data": {"enabled": enabled}},
+        )
+        self._broadcast_sync()
+
+    def audit_action(
+        self,
+        action: str,
+        actor: str = "system",
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        self._events.audit(action, actor=actor, detail=detail)
+        self._broadcast_audit(action, actor, detail or {})
+
+    def _broadcast_audit(
+        self,
+        action: str,
+        actor: str,
+        detail: dict[str, Any],
+    ) -> None:
+        self._broadcast(
+            {
+                "type": "audit",
+                "data": {
+                    "action": action,
+                    "actor": actor,
+                    "detail": detail,
+                    "timestamp": time.time(),
+                },
+            }
+        )
+
+    def _begin_run(
+        self,
+        task_id: str,
+        trigger: str,
+        voice_command_id: str | None = None,
+    ) -> str:
+        run_id = self._events.start_run(task_id, trigger, voice_command_id)
+        with self._task_lock:
+            self._current_run_id = run_id
+        return run_id
+
+    def _end_run(
+        self,
+        run_id: str | None,
+        *,
+        success: bool,
+        code: str | None = None,
+    ) -> None:
+        if run_id:
+            self._events.finish_run(run_id, success=success, code=code)
+        with self._task_lock:
+            if self._current_run_id == run_id:
+                self._current_run_id = None
+
+    def force_idle(self, actor: str = "user") -> dict[str, Any]:
+        self.audit_action("force_idle", actor=actor)
+        with self._task_lock:
+            self._busy = False
+            self._chain_active = False
+            self._chain_abort = False
+            self._current_task_id = ""
+            self._voice_command_id = ""
+            self._current_run_id = None
+        self._broadcast(
+            {
+                "type": "task_complete",
+                "data": {"task": "", "success": False, "forced_idle": True},
+            }
+        )
+        self._broadcast_sync()
+        return {"ok": True, "message": "화면 잠금을 해제했습니다."}
+
+    def _broadcast_sync(self) -> None:
+        with self._task_lock:
+            sync = {
+                "busy": self._busy,
+                "current_task": self._current_task_id,
+                "last_status": self._last_status,
+                "maintenance": self._maintenance_mode,
+            }
+        self._broadcast({"type": "sync", "data": sync})
 
     def _is_terminal_status(self, payload: dict[str, Any]) -> bool:
         state = payload.get("state", "")
@@ -112,12 +251,20 @@ class RosBridge(Node):
         except json.JSONDecodeError:
             payload = {"message": msg.data}
         self._last_status = payload
+        with self._task_lock:
+            run_id = self._current_run_id
+        try:
+            self._events.record_status(payload, run_id=run_id)
+        except Exception as exc:
+            self.get_logger().warning(f"status 이벤트 저장 실패: {exc}")
         state = payload.get("state", "")
         step = payload.get("step", "")
         if payload.get("task"):
             with self._task_lock:
-                self._current_task_id = payload["task"]
+                if self._busy:
+                    self._current_task_id = payload["task"]
         with self._task_lock:
+            prev_busy = self._busy
             if self._should_release_busy(payload):
                 self._busy = False
                 rel_state = payload.get("state", "")
@@ -130,9 +277,10 @@ class RosBridge(Node):
                 elif rel_step == "finish" and rel_state == "done":
                     self._current_task_id = ""
                     self._voice_command_id = ""
-            elif state == "running":
-                self._busy = True
+            busy_changed = prev_busy != self._busy
         self._broadcast({"type": "status", "data": payload})
+        if busy_changed:
+            self._broadcast_sync()
 
     def _on_alert(self, msg: String) -> None:
         try:
@@ -140,6 +288,10 @@ class RosBridge(Node):
         except json.JSONDecodeError:
             payload = {"message": msg.data}
         self._last_alert = payload
+        try:
+            self._events.record_alert(payload)
+        except Exception as exc:
+            self.get_logger().warning(f"안전 알람 저장 실패: {exc}")
         self._broadcast({"type": "safety_alert", "data": payload})
 
     def _broadcast(self, message: dict) -> None:
@@ -165,6 +317,7 @@ class RosBridge(Node):
                 "busy": self._busy,
                 "current_task": self._current_task_id,
                 "last_status": self._last_status,
+                "maintenance": self._maintenance_mode,
             }
         asyncio.run_coroutine_threadsafe(
             ws.send_text(
@@ -213,12 +366,13 @@ class RosBridge(Node):
         self.get_logger().warning("SetRobotControl 두 코드 모두 실패 — 이미 정상 상태이거나 복구 불가")
         return False
 
-    def reset_and_home(self) -> dict[str, Any]:
+    def reset_and_home(self, actor: str = "user") -> dict[str, Any]:
         """SAFE_STOP 해제 → 세션 정리 → 홈 복귀 (백그라운드 스레드).
 
         정상 상태에서 호출하면 SAFE_STOP 해제를 건너뛰고 바로 홈 복귀한다.
         busy 중이면 stop 요청 후 1 초 대기하고 진행한다.
         """
+        self.audit_action("reset", actor=actor)
         self._reset_safe_stop()  # 이미 정상이면 no-op (실패해도 계속 진행)
 
         with self._task_lock:
@@ -242,6 +396,8 @@ class RosBridge(Node):
             self._busy = True
             self._current_task_id = "go_home"
 
+        run_id = self._begin_run("go_home", "admin")
+
         def _worker():
             success = False
             try:
@@ -249,12 +405,14 @@ class RosBridge(Node):
             except Exception as exc:
                 self.get_logger().error(f"홈 복귀 실패: {exc}")
             finally:
+                self._end_run(run_id, success=success)
                 with self._task_lock:
                     self._busy = False
                     self._current_task_id = ""
                 self._broadcast(
                     {"type": "task_complete", "data": {"task": "go_home", "success": success}}
                 )
+                self._broadcast_sync()
 
         threading.Thread(target=_worker, name="cobot1_reset_home", daemon=True).start()
         return {
@@ -269,9 +427,17 @@ class RosBridge(Node):
     def shutdown_session(self) -> None:
         self._task_session.cleanup()
 
-    def stop_task(self) -> dict[str, Any]:
+    def stop_task(self, actor: str = "user") -> dict[str, Any]:
+        self.audit_action("stop", actor=actor)
         with self._task_lock:
             if not self._busy:
+                if actor == "admin":
+                    self.force_idle(actor=actor)
+                    return {
+                        "success": True,
+                        "message": "실행 중인 작업이 없어 사용자 화면 잠금을 해제했습니다.",
+                        "code": "FORCED_IDLE",
+                    }
                 return {
                     "success": False,
                     "message": "실행 중인 작업이 없습니다.",
@@ -281,44 +447,30 @@ class RosBridge(Node):
             self._chain_active = False
             task_id = self._current_task_id or self._task_session.current_task
         stopped = self._task_session.request_stop()
-        self._schedule_stop_watchdog(task_id)
+        self._schedule_stop_watchdog(task_id, actor=actor)
+        self._broadcast_sync()
         return {
             "success": stopped,
             "message": "작업을 중단하고 기본 위치로 복귀합니다.",
             "code": "STOPPING",
         }
 
-    def _schedule_stop_watchdog(self, task_id: str) -> None:
+    def _schedule_stop_watchdog(self, task_id: str, actor: str = "user") -> None:
         """정지 후에도 busy 가 풀리지 않을 때 UI·상태 강제 해제."""
+        timeout_sec = 30.0 if actor == "admin" else 90.0
 
         def _watch() -> None:
-            deadline = time.time() + 90.0
+            deadline = time.time() + timeout_sec
             while time.time() < deadline:
                 with self._task_lock:
                     if not self._busy:
+                        self._broadcast_sync()
                         return
                 time.sleep(1.0)
             self.get_logger().warning(
-                "정지 watchdog: busy 강제 해제 (task=%s)" % task_id
+                "정지 watchdog: busy 강제 해제 (task=%s, actor=%s)" % (task_id, actor)
             )
-            with self._task_lock:
-                if not self._busy:
-                    return
-                self._busy = False
-                self._chain_active = False
-                self._chain_abort = False
-                self._current_task_id = ""
-                self._voice_command_id = ""
-            self._broadcast(
-                {
-                    "type": "task_complete",
-                    "data": {
-                        "task": task_id,
-                        "success": False,
-                        "aborted": True,
-                    },
-                }
-            )
+            self.force_idle(actor=actor)
 
         threading.Thread(
             target=_watch,
@@ -371,6 +523,18 @@ class RosBridge(Node):
                     "code": "BUSY",
                 }
 
+        blocked = self._check_maintenance()
+        if blocked:
+            return {
+                "matched": True,
+                "command_id": command.id,
+                "action": "rejected",
+                "speech": self._speech_payload("global", "error"),
+                "success": False,
+                "message": blocked["message"],
+                "code": blocked["code"],
+            }
+
         if command.action == "run_chain":
             return self._start_task_chain(command)
 
@@ -410,6 +574,18 @@ class RosBridge(Node):
                 "code": "NO_ROBOT",
             }
 
+        blocked = self._check_maintenance()
+        if blocked:
+            return {
+                "matched": True,
+                "command_id": command.id,
+                "action": "rejected",
+                "speech": self._speech_payload("global", "error"),
+                "success": False,
+                "message": blocked["message"],
+                "code": blocked["code"],
+            }
+
         _ensure_registry()
         for task_id in command.task_ids:
             if task_id not in TASK_REGISTRY:
@@ -433,6 +609,12 @@ class RosBridge(Node):
         task_ids = command.task_ids
         label = self._voice_labels.get(command.id, command.id)
 
+        self.audit_action(
+            "task_start",
+            actor="voice",
+            detail={"task_id": command.id, "chain": task_ids},
+        )
+
         def _worker():
             success = True
             failed_task = ""
@@ -445,7 +627,16 @@ class RosBridge(Node):
                             failed_task = task_id
                             aborted = True
                             break
-                    if not self._execute_task(task_id):
+                    run_id = self._begin_run(
+                        task_id, "voice", voice_command_id=command.id
+                    )
+                    task_ok = self._execute_task(task_id)
+                    self._end_run(
+                        run_id,
+                        success=task_ok,
+                        code=None if task_ok else "TASK_FAILED",
+                    )
+                    if not task_ok:
                         success = False
                         failed_task = task_id
                         break
@@ -471,6 +662,7 @@ class RosBridge(Node):
                         },
                     }
                 )
+                self._broadcast_sync()
 
         threading.Thread(
             target=_worker,
@@ -495,6 +687,10 @@ class RosBridge(Node):
                 "message": f"알 수 없는 작업: {task_id}",
                 "code": "NOT_FOUND",
             }
+
+        blocked = self._check_maintenance()
+        if blocked:
+            return blocked
 
         if task_id == "prepare_medication":
             with self._task_lock:
@@ -559,6 +755,8 @@ class RosBridge(Node):
             self._current_task_id = task_id
 
         label = next((t["label"] for t in TASK_CATALOG if t["id"] == task_id), task_id)
+        self.audit_action("task_start", actor="web", detail={"task_id": task_id})
+        run_id = self._begin_run(task_id, "web")
 
         def _worker():
             success = False
@@ -567,6 +765,11 @@ class RosBridge(Node):
             except Exception as exc:
                 self.get_logger().error(f"태스크 {task_id} 실패: {exc}")
             finally:
+                self._end_run(
+                    run_id,
+                    success=success,
+                    code=None if success else "TASK_FAILED",
+                )
                 with self._task_lock:
                     self._busy = False
                     self._current_task_id = ""
@@ -576,6 +779,7 @@ class RosBridge(Node):
                         "data": {"task": task_id, "success": success},
                     }
                 )
+                self._broadcast_sync()
 
         threading.Thread(
             target=_worker,
@@ -624,35 +828,54 @@ def _web_dist_dir():
     """설치(share) 또는 개발(소스) 경로에서 web/dist 를 찾습니다.
 
     npm run build 직후 colcon build 를 안 하면 install 쪽 dist 가 오래될 수 있으므로
-    더 최신 index.html 이 있는 쪽을 사용합니다.
+    후보 경로 중 index.html 이 가장 최신인 디렉터리를 사용합니다.
     """
     from pathlib import Path
 
-    source = Path(__file__).resolve().parents[3] / "web" / "dist"
-    installed: Path | None = None
+    here = Path(__file__).resolve()
+    candidates: list[Path] = []
+
     try:
         from ament_index_python.packages import get_package_share_directory
 
         share = Path(get_package_share_directory("cobot1"))
-        candidate = share / "web" / "dist"
-        if candidate.is_dir():
-            installed = candidate
+        candidates.append(share / "web" / "dist")
     except Exception:
         pass
+
+    # 소스 트리 (cobot1/cobot1/bridge → cobot1/web/dist)
+    pkg_dist = here.parents[2] / "web" / "dist"
+    if pkg_dist.is_dir():
+        candidates.append(pkg_dist)
+
+    # 워크스페이스 src/cobot1/web/dist (ros2 run 시 install 경로에서도 탐색)
+    for ancestor in here.parents:
+        src_dist = ancestor / "src" / "cobot1" / "web" / "dist"
+        if src_dist.is_dir():
+            candidates.append(src_dist)
+            break
+        if (ancestor / "web" / "dist").is_dir() and (ancestor / "package.xml").is_file():
+            candidates.append(ancestor / "web" / "dist")
+            break
 
     def _index_mtime(path: Path) -> float:
         index = path / "index.html"
         return index.stat().st_mtime if index.is_file() else 0.0
 
-    if source.is_dir() and installed is not None:
-        if _index_mtime(source) >= _index_mtime(installed):
-            return source
-        return installed
-    if installed is not None:
-        return installed
-    if source.is_dir():
-        return source
-    return Path()
+    best: Path | None = None
+    best_mtime = -1.0
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path.resolve())
+        if key in seen or not path.is_dir():
+            continue
+        seen.add(key)
+        mtime = _index_mtime(path)
+        if mtime > best_mtime:
+            best_mtime = mtime
+            best = path
+
+    return best if best is not None else Path()
 
 
 def _mount_web_ui(app, dist) -> None:
@@ -672,9 +895,20 @@ def _mount_web_ui(app, dist) -> None:
 
     class SPAStaticFiles(StaticFiles):
         async def get_response(self, path: str, scope):
-            response = await super().get_response(path, scope)
+            try:
+                response = await super().get_response(path, scope)
+            except Exception as exc:
+                from starlette.exceptions import HTTPException as StarletteHTTPException
+
+                status = getattr(exc, "status_code", None)
+                if self.html and status == 404:
+                    response = await super().get_response("index.html", scope)
+                else:
+                    raise
             req_path = scope.get("path", "")
             if req_path in ("", "/") or path in ("", "index.html"):
+                response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            elif req_path.startswith("/admin"):
                 response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
             return response
 
@@ -754,6 +988,7 @@ def create_app():
                 "api_ok": False,
                 "robot_ready": False,
                 "busy": False,
+                "maintenance": False,
                 "robot_namespace": ROBOT_ID,
             }
         robot_ready = bridge.refresh_robot_ready()
@@ -772,6 +1007,7 @@ def create_app():
             "api_ok": True,
             "robot_ready": robot_ready,
             "busy": bridge._busy,
+            "maintenance": bridge._maintenance_mode,
             "current_task": bridge._current_task_id,
             "current_task_label": label,
             "current_step": bridge._last_status.get("step", ""),
@@ -804,6 +1040,8 @@ def create_app():
         result = bridge.start_task(task_id)
         if result.get("code") == "NOT_FOUND":
             raise HTTPException(status_code=404, detail=result["message"])
+        if result.get("code") == "MAINTENANCE":
+            raise HTTPException(status_code=503, detail=result["message"])
         return result
 
     @app.post("/api/stop")
@@ -842,19 +1080,11 @@ def create_app():
         bridge = bridge_holder.get("bridge")
         if bridge is None:
             raise HTTPException(status_code=503, detail="ROS bridge 초기화 중")
-        with bridge._task_lock:
-            bridge._busy = False
-            bridge._chain_active = False
-            bridge._chain_abort = False
-            bridge._current_task_id = ""
-            bridge._voice_command_id = ""
-        bridge._broadcast(
-            {
-                "type": "task_complete",
-                "data": {"task": "", "success": False, "forced_idle": True},
-            }
-        )
-        return {"ok": True, "message": "화면 잠금을 해제했습니다."}
+        return bridge.force_idle(actor="user")
+
+    from cobot1.bridge.admin_routes import register_admin_routes
+
+    register_admin_routes(app, bridge_holder)
 
     async def care_websocket_endpoint(websocket: WebSocket) -> None:
         await websocket.accept()

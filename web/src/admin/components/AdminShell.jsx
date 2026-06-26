@@ -12,6 +12,7 @@ export default function AdminShell({ onLogout, wsConnected }) {
           <NavLink to="/admin/logs">라이브 로그</NavLink>
           <NavLink to="/admin/runs">동작 이력</NavLink>
           <NavLink to="/admin/safety">안전 관리</NavLink>
+          <NavLink to="/admin/care">케어 모니터링</NavLink>
           <NavLink to="/admin/audit">감사 로그</NavLink>
         </nav>
         <div className="admin-sidebar-footer">

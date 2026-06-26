@@ -103,6 +103,21 @@ class Rg2ModbusClient:
     def open(self) -> None:
         self._write_command(self._max_force, self._max_width, _RCTR_MOVE)
 
+    def open_slow(
+        self,
+        force: int | float | None = None,
+        steps: int = 6,
+        step_pause_sec: float = 0.4,
+    ) -> None:
+        """너비를 단계적으로 넓혀 천천히 연다. 낮은 힘으로 뚜껑 튕김을 줄인다."""
+        f = int(force) if force is not None else min(100, self._max_force)
+        steps = max(1, int(steps))
+        pause = max(0.0, float(step_pause_sec))
+        for i in range(1, steps + 1):
+            width = int(self._max_width * i / steps)
+            self._write_command(f, width, _RCTR_MOVE)
+            self.wait_until_idle(min_wait_sec=pause)
+
     def close(self) -> None:
         self._write_command(self._max_force, 0, _RCTR_MOVE)
 

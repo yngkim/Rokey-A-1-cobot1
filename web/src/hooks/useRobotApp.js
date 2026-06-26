@@ -56,6 +56,7 @@ export function useRobotApp(speechRef) {
   const [status, setStatus] = useState(null)
   const [alert, setAlert] = useState(null)
   const [toast, setToast] = useState(null)
+  const [phoneLocation, setPhoneLocation] = useState('on_charger')
   const wsRef = useRef(null)
   const voiceChainRef = useRef(false)
   const stopTimeoutRef = useRef(null)
@@ -99,6 +100,7 @@ export function useRobotApp(speechRef) {
     setBusy(!!data.busy)
     setMaintenance(!!data.maintenance)
     setActiveTaskId(data.current_task || '')
+    if (data.phone_location) setPhoneLocation(data.phone_location)
     if (data.last_status) setStatus(data.last_status)
     if (!data.busy) {
       setStopping(false)
@@ -124,6 +126,7 @@ export function useRobotApp(speechRef) {
         setMaintenance(!!h.maintenance)
         setActiveTaskId(h.current_task || '')
         updateTaskLabel(h.current_task || '', h.current_task_label || '')
+        if (h.phone_location) setPhoneLocation(h.phone_location)
         if (!h.busy) {
           setStopping(false)
           voiceChainRef.current = false
@@ -252,10 +255,6 @@ export function useRobotApp(speechRef) {
 
         if (state === 'stopping' || step === 'user_stop') setStopping(true)
 
-        if (state === 'done' && step !== 'finish') {
-          showToast(`${step} 완료`)
-        }
-
         if (
           msg.data?.code === 'EXTERNAL_FORCE' ||
           msg.data?.step === 'safety_abort'
@@ -285,6 +284,7 @@ export function useRobotApp(speechRef) {
     robotReady,
     busy,
     maintenance,
+    phoneLocation,
     stopping,
     activeTaskId,
     activeTaskLabel,

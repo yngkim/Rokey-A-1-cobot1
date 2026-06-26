@@ -8,11 +8,19 @@ import threading
 import time
 from typing import Any
 
+from pydantic import BaseModel
+
 import rclpy
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_msgs.msg import String
 
+from cobot1.bridge.care_store import (
+    EVENT_MEAL,
+    EVENT_MEDICATION_PREPARE,
+    EVENT_MEDICATION_TAKEN,
+    get_care_store,
+)
 from cobot1.bridge.event_store import get_event_store
 from cobot1.bridge.task_session import WebTaskSession
 from cobot1.motion.safety import UNSAFE_ROBOT_STATES
@@ -25,12 +33,21 @@ from cobot1.bridge.voice_intent import (
     resolve_voice_command,
 )
 from cobot1.robot_config import ROBOT_ID
+from cobot1.runtime_state import (
+    PHONE_ON_CHARGER,
+    PHONE_WITH_USER,
+    can_pick_from_charger,
+    can_place_on_charger,
+    get_phone_location,
+    set_phone_location,
+)
 from cobot1.task_runner import TASK_REGISTRY, _ensure_registry
 
 TASK_CATALOG: list[dict[str, str]] = [
     {"id": "prepare_medication", "label": "약 준비하기", "icon": "💊", "group": "복약"},
     {"id": "place_on_charger", "label": "핸드폰 가져다놓기", "icon": "📲", "group": "스마트폰"},
     {"id": "pick_from_charger", "label": "핸드폰 가져오기", "icon": "🔋", "group": "스마트폰"},
+    {"id": "measure_tray_weight", "label": "식판 무게 측정", "icon": "🍽️", "group": "식사"},
     {"id": "go_home", "label": "기본 위치 복귀", "icon": "🏠", "group": "제어"},
 ]
 
@@ -68,6 +85,8 @@ class RosBridge(Node):
         self._voice_command_id = ""
         self._voice_labels: dict[str, str] = load_voice_config().get("labels", {})
         self._events = get_event_store()
+        self._care = get_care_store()
+        self._active_care_user_id = self._default_care_user_id()
         self._maintenance_mode = False
         self._current_run_id: str | None = None
         self._robot_state = -1
@@ -90,6 +109,87 @@ class RosBridge(Node):
             "care_web_bridge 준비 (namespace=%s, robot_ready=%s)"
             % (ROBOT_ID, self._robot_ready)
         )
+
+    def _default_care_user_id(self) -> str:
+        users = self._care.list_users()
+        return users[0]["id"] if users else "patient_01"
+
+    def set_active_care_user(self, user_id: str) -> dict[str, Any]:
+        user = self._care.get_user(user_id)
+        if user is None:
+            return {
+                "success": False,
+                "message": "등록되지 않은 사용자입니다.",
+                "code": "NOT_FOUND",
+            }
+        self._active_care_user_id = user_id
+        return {"success": True, "user": user}
+
+    def get_active_care_user(self) -> dict[str, Any]:
+        user = self._care.get_user(self._active_care_user_id)
+        if user is None:
+            user = self._care.ensure_user(
+                self._default_care_user_id(),
+                "기본 사용자",
+            )
+            self._active_care_user_id = user["id"]
+        return user
+
+    def record_care_event(
+        self,
+        *,
+        event_type: str,
+        user_id: str | None = None,
+        quantity: float = 1.0,
+        unit: str = "dose",
+        note: str | None = None,
+        run_id: str | None = None,
+        source: str = "web",
+        detail: dict | None = None,
+    ) -> dict[str, Any]:
+        uid = user_id or self._active_care_user_id
+        event = self._care.record_event(
+            user_id=uid,
+            event_type=event_type,
+            quantity=quantity,
+            unit=unit,
+            note=note,
+            run_id=run_id,
+            source=source,
+            detail=detail,
+        )
+        self.audit_action(
+            "care_event",
+            actor=source,
+            detail={"user_id": uid, "event_type": event_type, "quantity": quantity},
+        )
+        return event
+
+    def _log_prepare_medication_care(
+        self,
+        *,
+        success: bool,
+        user_id: str | None,
+        run_id: str | None,
+        source: str,
+    ) -> None:
+        if not success:
+            return
+        uid = user_id or self._active_care_user_id
+        if not uid or self._care.get_user(uid) is None:
+            return
+        try:
+            self.record_care_event(
+                event_type=EVENT_MEDICATION_PREPARE,
+                user_id=uid,
+                quantity=1.0,
+                unit="dose",
+                note="로봇 약 준비 완료",
+                run_id=run_id,
+                source=source,
+            )
+        except Exception as exc:
+            self.get_logger().warning(f"케어 기록 실패 (medication_prepare): {exc}")
 
     def refresh_robot_ready(self) -> bool:
         self._robot_ready = self._robot_mode_client.wait_for_service(timeout_sec=0.5)
@@ -209,6 +309,7 @@ class RosBridge(Node):
                 "current_task": self._current_task_id,
                 "last_status": self._last_status,
                 "maintenance": self._maintenance_mode,
+                "phone_location": get_phone_location(),
             }
         self._broadcast({"type": "sync", "data": sync})
 
@@ -318,6 +419,7 @@ class RosBridge(Node):
                 "current_task": self._current_task_id,
                 "last_status": self._last_status,
                 "maintenance": self._maintenance_mode,
+                "phone_location": get_phone_location(),
             }
         asyncio.run_coroutine_threadsafe(
             ws.send_text(
@@ -479,21 +581,49 @@ class RosBridge(Node):
         ).start()
 
     def _speech_payload(self, command_id: str, phase: str) -> dict[str, str]:
-        if phase == "not_understood":
-            text = get_speech("global", "not_understood")
-        elif phase == "busy":
-            text = get_speech("global", "busy")
-        elif phase == "error":
-            text = get_speech("global", "error")
+        global_phases = (
+            "not_understood",
+            "busy",
+            "error",
+            "phone_with_user",
+            "phone_on_charger",
+        )
+        if phase in global_phases:
+            text = get_speech("global", phase)
         else:
             text = get_speech(command_id, phase)
         return {"text": text, "phase": phase}
+
+    def _phone_task_rejection(self, task_id: str) -> dict[str, str] | None:
+        if task_id == "pick_from_charger" and not can_pick_from_charger():
+            return {
+                "message": get_speech("global", "phone_with_user"),
+                "code": "PHONE_WITH_USER",
+                "speech_phase": "phone_with_user",
+            }
+        if task_id == "place_on_charger" and not can_place_on_charger():
+            return {
+                "message": get_speech("global", "phone_on_charger"),
+                "code": "PHONE_ON_CHARGER",
+                "speech_phase": "phone_on_charger",
+            }
+        return None
+
+    def _apply_phone_task_result(self, task_id: str) -> None:
+        if task_id == "pick_from_charger":
+            set_phone_location(PHONE_WITH_USER)
+        elif task_id == "place_on_charger":
+            set_phone_location(PHONE_ON_CHARGER)
+        else:
+            return
+        self._broadcast_sync()
 
     def handle_voice_command(self, text: str) -> dict[str, Any]:
         command = resolve_voice_command(text)
         if command is None:
             return {
                 "matched": False,
+                "heard_text": text,
                 "speech": self._speech_payload("global", "not_understood"),
                 "code": "NOT_MATCHED",
             }
@@ -536,7 +666,34 @@ class RosBridge(Node):
             }
 
         if command.action == "run_chain":
-            return self._start_task_chain(command)
+            return self._start_task_chain(command, trigger="voice")
+
+        if command.action == "run_task":
+            task_id = command.task_id
+            if not task_id:
+                return {
+                    "matched": True,
+                    "command_id": command.id,
+                    "action": "rejected",
+                    "speech": self._speech_payload("global", "error"),
+                    "success": False,
+                    "message": "실행할 작업이 지정되지 않았습니다.",
+                    "code": "INVALID_TASK",
+                }
+            phone_block = self._phone_task_rejection(task_id)
+            if phone_block:
+                return {
+                    "matched": True,
+                    "command_id": command.id,
+                    "action": "rejected",
+                    "speech": self._speech_payload(
+                        "global", phone_block["speech_phase"]
+                    ),
+                    "success": False,
+                    "message": phone_block["message"],
+                    "code": phone_block["code"],
+                }
+            return self._start_voice_task(command)
 
         return {
             "matched": True,
@@ -548,7 +705,103 @@ class RosBridge(Node):
             "code": "UNSUPPORTED",
         }
 
-    def _start_task_chain(self, command: VoiceCommand) -> dict[str, Any]:
+    def _start_voice_task(self, command: VoiceCommand) -> dict[str, Any]:
+        task_id = command.task_id
+        if not self.refresh_robot_ready():
+            return {
+                "matched": True,
+                "command_id": command.id,
+                "action": "rejected",
+                "speech": self._speech_payload("global", "error"),
+                "success": False,
+                "message": (
+                    "로봇 제어 서비스에 연결되지 않았습니다. "
+                    "bringup을 실행하고 SERVO ON 상태인지 확인하세요."
+                ),
+                "code": "NO_ROBOT",
+            }
+
+        _ensure_registry()
+        if task_id not in TASK_REGISTRY:
+            return {
+                "matched": True,
+                "command_id": command.id,
+                "action": "rejected",
+                "speech": self._speech_payload("global", "error"),
+                "success": False,
+                "message": f"등록되지 않은 작업: {task_id}",
+                "code": "NOT_FOUND",
+            }
+
+        with self._task_lock:
+            self._busy = True
+            self._chain_active = False
+            self._chain_abort = False
+            self._voice_command_id = command.id
+            self._current_task_id = task_id
+
+        label = self._voice_labels.get(command.id, task_id)
+        self.audit_action(
+            "task_start",
+            actor="voice",
+            detail={"task_id": task_id, "voice_command_id": command.id},
+        )
+        run_id = self._begin_run(task_id, "voice", voice_command_id=command.id)
+
+        def _worker():
+            success = False
+            try:
+                success = self._execute_task(task_id)
+            except Exception as exc:
+                self.get_logger().error(f"음성 태스크 {task_id} 실패: {exc}")
+            finally:
+                if success:
+                    self._apply_phone_task_result(task_id)
+                self._end_run(
+                    run_id,
+                    success=success,
+                    code=None if success else "TASK_FAILED",
+                )
+                with self._task_lock:
+                    self._busy = False
+                    self._current_task_id = ""
+                    self._voice_command_id = ""
+                self._broadcast(
+                    {
+                        "type": "task_complete",
+                        "data": {
+                            "task": task_id,
+                            "success": success,
+                            "voice_command_id": command.id,
+                        },
+                    }
+                )
+                self._broadcast_sync()
+
+        threading.Thread(
+            target=_worker,
+            name=f"cobot1_voice_{command.id}",
+            daemon=True,
+        ).start()
+
+        return {
+            "matched": True,
+            "command_id": command.id,
+            "task_id": task_id,
+            "action": "started",
+            "speech": self._speech_payload(command.id, "ack"),
+            "success": True,
+            "message": f"{label} 실행을 시작했습니다.",
+            "code": "STARTED",
+        }
+
+    def _start_task_chain(
+        self,
+        command: VoiceCommand,
+        *,
+        trigger: str = "voice",
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
         if not command.task_ids:
             return {
                 "matched": True,
@@ -608,17 +861,23 @@ class RosBridge(Node):
 
         task_ids = command.task_ids
         label = self._voice_labels.get(command.id, command.id)
+        care_user_id = user_id or self._active_care_user_id
 
         self.audit_action(
             "task_start",
-            actor="voice",
-            detail={"task_id": command.id, "chain": task_ids},
+            actor=trigger,
+            detail={
+                "task_id": command.id,
+                "chain": task_ids,
+                "user_id": care_user_id,
+            },
         )
 
         def _worker():
             success = True
             failed_task = ""
             aborted = False
+            last_run_id: str | None = None
             try:
                 for task_id in task_ids:
                     with self._task_lock:
@@ -628,8 +887,9 @@ class RosBridge(Node):
                             aborted = True
                             break
                     run_id = self._begin_run(
-                        task_id, "voice", voice_command_id=command.id
+                        task_id, trigger, voice_command_id=command.id
                     )
+                    last_run_id = run_id
                     task_ok = self._execute_task(task_id)
                     self._end_run(
                         run_id,
@@ -640,10 +900,18 @@ class RosBridge(Node):
                         success = False
                         failed_task = task_id
                         break
+                    self._apply_phone_task_result(task_id)
             except Exception as exc:
                 success = False
                 self.get_logger().error(f"음성 체인 {command.id} 실패: {exc}")
             finally:
+                if command.id == "prepare_medication":
+                    self._log_prepare_medication_care(
+                        success=success,
+                        user_id=care_user_id,
+                        run_id=last_run_id,
+                        source=trigger,
+                    )
                 with self._task_lock:
                     self._busy = False
                     self._chain_active = False
@@ -680,7 +948,7 @@ class RosBridge(Node):
             "code": "STARTED",
         }
 
-    def start_task(self, task_id: str) -> dict[str, Any]:
+    def start_task(self, task_id: str, user_id: str | None = None) -> dict[str, Any]:
         if task_id not in TASK_IDS:
             return {
                 "success": False,
@@ -691,6 +959,14 @@ class RosBridge(Node):
         blocked = self._check_maintenance()
         if blocked:
             return blocked
+
+        phone_block = self._phone_task_rejection(task_id)
+        if phone_block:
+            return {
+                "success": False,
+                "message": phone_block["message"],
+                "code": phone_block["code"],
+            }
 
         if task_id == "prepare_medication":
             with self._task_lock:
@@ -713,7 +989,11 @@ class RosBridge(Node):
                 action="run_chain",
                 task_ids=chain_ids,
             )
-            result = self._start_task_chain(command)
+            result = self._start_task_chain(
+                command,
+                trigger="web",
+                user_id=user_id,
+            )
             return {
                 "success": result.get("success", False),
                 "message": result.get("message", ""),
@@ -765,6 +1045,8 @@ class RosBridge(Node):
             except Exception as exc:
                 self.get_logger().error(f"태스크 {task_id} 실패: {exc}")
             finally:
+                if success:
+                    self._apply_phone_task_result(task_id)
                 self._end_run(
                     run_id,
                     success=success,
@@ -933,13 +1215,33 @@ def _mount_web_ui(app, dist) -> None:
     app.router.routes.append(HTTPOnlyMount("/", app=static, name="static"))
 
 
+class VoiceCommandRequest(BaseModel):
+    text: str
+
+
+class TaskRunRequest(BaseModel):
+    user_id: str | None = None
+
+
+class ActiveCareUserRequest(BaseModel):
+    user_id: str
+
+
+class CareEventRequest(BaseModel):
+    event_type: str
+    user_id: str | None = None
+    quantity: float = 1.0
+    unit: str = "dose"
+    note: str | None = None
+    detail: dict | None = None
+
+
 def create_app():
     try:
         from contextlib import asynccontextmanager
 
         from fastapi import FastAPI, HTTPException
         from fastapi.middleware.cors import CORSMiddleware
-        from pydantic import BaseModel
         from starlette.routing import WebSocketRoute
         from starlette.websockets import WebSocket, WebSocketDisconnect
     except ImportError as exc:
@@ -948,9 +1250,6 @@ def create_app():
         ) from exc
 
     from pathlib import Path
-
-    class VoiceCommandRequest(BaseModel):
-        text: str
 
     bridge_holder: dict[str, RosBridge] = {}
 
@@ -1012,6 +1311,9 @@ def create_app():
             "current_task_label": label,
             "current_step": bridge._last_status.get("step", ""),
             "robot_namespace": ROBOT_ID,
+            "phone_location": get_phone_location(),
+            "phone_pick_available": can_pick_from_charger(),
+            "phone_place_available": can_place_on_charger(),
         }
 
     @app.get("/api/tasks")
@@ -1033,16 +1335,62 @@ def create_app():
         return bridge.handle_voice_command(text)
 
     @app.post("/api/tasks/{task_id}")
-    def run_task(task_id: str):
+    def run_task(task_id: str, body: TaskRunRequest | None = None):
         bridge = bridge_holder.get("bridge")
         if bridge is None:
             raise HTTPException(status_code=503, detail="ROS bridge 초기화 중")
-        result = bridge.start_task(task_id)
+        user_id = body.user_id if body else None
+        result = bridge.start_task(task_id, user_id=user_id)
         if result.get("code") == "NOT_FOUND":
             raise HTTPException(status_code=404, detail=result["message"])
         if result.get("code") == "MAINTENANCE":
             raise HTTPException(status_code=503, detail=result["message"])
         return result
+
+    @app.get("/api/care/users")
+    def care_users():
+        return {"users": get_care_store().list_users()}
+
+    @app.get("/api/care/active-user")
+    def care_active_user():
+        bridge = bridge_holder.get("bridge")
+        if bridge is None:
+            raise HTTPException(status_code=503, detail="ROS bridge 초기화 중")
+        return {"user": bridge.get_active_care_user()}
+
+    @app.post("/api/care/active-user")
+    def care_set_active_user(body: ActiveCareUserRequest):
+        bridge = bridge_holder.get("bridge")
+        if bridge is None:
+            raise HTTPException(status_code=503, detail="ROS bridge 초기화 중")
+        result = bridge.set_active_care_user(body.user_id)
+        if not result.get("success"):
+            raise HTTPException(status_code=404, detail=result.get("message"))
+        return result
+
+    @app.post("/api/care/events")
+    def care_record_event(body: CareEventRequest):
+        bridge = bridge_holder.get("bridge")
+        if bridge is None:
+            raise HTTPException(status_code=503, detail="ROS bridge 초기화 중")
+        if body.event_type not in (
+            EVENT_MEDICATION_TAKEN,
+            EVENT_MEAL,
+        ):
+            raise HTTPException(status_code=400, detail="지원하지 않는 이벤트 유형입니다")
+        unit = body.unit
+        if body.event_type == EVENT_MEAL and unit == "dose":
+            unit = "serving"
+        event = bridge.record_care_event(
+            event_type=body.event_type,
+            user_id=body.user_id,
+            quantity=body.quantity,
+            unit=unit,
+            note=body.note,
+            source="web",
+            detail=body.detail,
+        )
+        return {"ok": True, "event": event}
 
     @app.post("/api/stop")
     def stop_task():

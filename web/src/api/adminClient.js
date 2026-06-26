@@ -92,6 +92,37 @@ export async function adminForceIdle() {
   return adminFetch('/api/admin/force_idle', { method: 'POST' })
 }
 
+export async function fetchCareUsers() {
+  return adminFetch('/api/admin/care/users')
+}
+
+export async function createCareUser(id, name) {
+  return adminFetch('/api/admin/care/users', {
+    method: 'POST',
+    body: JSON.stringify({ id, name }),
+  })
+}
+
+export async function fetchCareDaily(userId, date = '') {
+  const params = new URLSearchParams({ user_id: userId })
+  if (date) params.set('date', date)
+  return adminFetch(`/api/admin/care/daily?${params}`)
+}
+
+export async function fetchCareOverview(date = '') {
+  const params = new URLSearchParams()
+  if (date) params.set('date', date)
+  const qs = params.toString()
+  return adminFetch(`/api/admin/care/overview${qs ? `?${qs}` : ''}`)
+}
+
+export async function createCareEvent(body) {
+  return adminFetch('/api/admin/care/events', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
 export function connectAdminWebSocket(onMessage) {
   const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
   const host = import.meta.env.VITE_WS_HOST || window.location.host

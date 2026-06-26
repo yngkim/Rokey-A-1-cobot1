@@ -10,10 +10,20 @@ const DEFAULT_SPEECH = {
   stop: {
     ack: '네, 멈추겠습니다.',
   },
+  pick_phone: {
+    ack: '네, 핸드폰 가져다 드릴게요.',
+    complete: '핸드폰 가져왔어요.',
+  },
+  place_phone: {
+    ack: '네, 핸드폰 거치대에 갖다 놓을게요.',
+    complete: '핸드폰을 거치대에 놓았어요.',
+  },
   global: {
     not_understood: '잘 못 들었어요. 다시 말씀해 주세요.',
     busy: '지금 다른 일을 하고 있어요. 잠시만 기다려 주세요.',
     error: '작업 중 문제가 생겼어요.',
+    phone_with_user: '핸드폰은 이미 가져가셨어요.',
+    phone_on_charger: '핸드폰은 이미 거치대에 있어요.',
   },
 }
 

@@ -19,22 +19,41 @@ class VoiceCommand:
 
 
 def normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", text.strip())
+    """STT 결과 정규화 — 띄어쓰기·조사·존댓말 변형을 등록 문장 형식에 맞춤."""
+    text = re.sub(r"\s+", " ", text.strip())
+    text = re.sub(r"핸드폰[을를]\s*", "핸드폰 ", text)
+    # Web Speech API가 자주 넣는 띄어쓰기·존댓말 변형
+    text = re.sub(r"가져다\s*줘", "가져다줘", text)
+    text = re.sub(r"가져다\s*주세요", "가져다줘", text)
+    text = re.sub(r"가져와\s*줘", "가져와줘", text)
+    text = re.sub(r"가져와\s*주세요", "가져와줘", text)
+    text = re.sub(r"가져가\s*줘", "가져가줘", text)
+    text = re.sub(r"가져가\s*주세요", "가져가줘", text)
+    text = re.sub(r"준비해\s*줘", "준비해 줘", text)
+    text = re.sub(r"준비해줘", "준비해 줘", text)
+    return text.strip()
 
 
 def _parse_commands(data: dict[str, Any]) -> list[VoiceCommand]:
     commands: list[VoiceCommand] = []
     for item in data.get("commands", []):
         task_ids = item.get("task_ids") or []
-        commands.append(
-            VoiceCommand(
-                id=str(item["id"]),
-                phrase=normalize(str(item["phrase"])),
-                action=str(item["action"]),
-                task_id=str(item.get("task_id", "")),
-                task_ids=tuple(str(t) for t in task_ids),
+        phrases = item.get("phrases") or []
+        primary = str(item.get("phrase", "")).strip()
+        if primary:
+            phrases = [primary, *phrases]
+        if not phrases:
+            continue
+        for phrase in phrases:
+            commands.append(
+                VoiceCommand(
+                    id=str(item["id"]),
+                    phrase=normalize(str(phrase)),
+                    action=str(item["action"]),
+                    task_id=str(item.get("task_id", "")),
+                    task_ids=tuple(str(t) for t in task_ids),
+                )
             )
-        )
     return commands
 
 
@@ -79,10 +98,15 @@ def get_voice_catalog(config: dict[str, Any] | None = None) -> dict[str, Any]:
     data = config if config is not None else load_voice_config()
     commands = []
     for item in data.get("commands", []):
+        phrases = list(item.get("phrases") or [])
+        primary = str(item.get("phrase", "")).strip()
+        if primary and primary not in phrases:
+            phrases.insert(0, primary)
         commands.append(
             {
                 "id": item["id"],
-                "phrase": item["phrase"],
+                "phrase": primary or (phrases[0] if phrases else ""),
+                "phrases": phrases,
                 "action": item["action"],
             }
         )

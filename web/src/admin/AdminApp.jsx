@@ -10,6 +10,7 @@ import LiveLogsPage from './pages/LiveLogs'
 import RunDetailPage from './pages/RunDetail'
 import RunHistoryPage from './pages/RunHistory'
 import SafetyCenterPage from './pages/SafetyCenter'
+import UserCarePage from './pages/UserCare'
 import './admin.css'
 
 function AdminRoutes({ session, ws }) {
@@ -28,6 +29,7 @@ function AdminRoutes({ session, ws }) {
         <Route path="runs" element={<RunHistoryPage />} />
         <Route path="runs/:runId" element={<RunDetailPage />} />
         <Route path="safety" element={<SafetyCenterPage ws={ws} />} />
+        <Route path="care" element={<UserCarePage />} />
         <Route path="audit" element={<AuditLogPage />} />
       </Route>
     </Routes>

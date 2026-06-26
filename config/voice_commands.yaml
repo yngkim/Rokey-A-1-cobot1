@@ -8,6 +8,24 @@ commands:
       - pour_water
       - close_bottle
       - pick_place_pill
+  - id: pick_phone
+    phrases:
+      - "핸드폰 가져다줘"
+      - "핸드폰 가져와줘"
+      - "핸드폰 가져다 줘"
+      - "핸드폰 가져와 줘"
+      - "핸드폰을 가져다줘"
+      - "핸드폰 가져다주세요"
+    action: run_task
+    task_id: pick_from_charger
+  - id: place_phone
+    phrases:
+      - "핸드폰 가져가줘"
+      - "핸드폰 가져가 줘"
+      - "핸드폰을 가져가줘"
+      - "핸드폰 가져가주세요"
+    action: run_task
+    task_id: place_on_charger
   - id: stop
     phrase: "멈춰"
     action: stop
@@ -16,12 +34,22 @@ speech:
   prepare_medication:
     ack: "네, 약 준비해 드리겠습니다."
     complete: "약 준비가 끝났어요."
+  pick_phone:
+    ack: "네, 핸드폰 가져다 드릴게요."
+    complete: "핸드폰 가져왔어요."
+  place_phone:
+    ack: "네, 핸드폰 거치대에 갖다 놓을게요."
+    complete: "핸드폰을 거치대에 놓았어요."
   stop:
     ack: "네, 멈추겠습니다."
   global:
     not_understood: "잘 못 들었어요. 다시 말씀해 주세요."
     busy: "지금 다른 일을 하고 있어요. 잠시만 기다려 주세요."
     error: "작업 중 문제가 생겼어요."
+    phone_with_user: "핸드폰은 이미 가져가셨어요."
+    phone_on_charger: "핸드폰은 이미 거치대에 있어요."
 
 labels:
   prepare_medication: "약 준비하기"
+  pick_phone: "핸드폰 가져오기"
+  place_phone: "핸드폰 가져다놓기"

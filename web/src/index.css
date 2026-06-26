@@ -112,6 +112,33 @@ body.admin-mode #root {
   color: #ffc107;
 }
 
+.care-user-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 20px 12px;
+  font-size: 0.85rem;
+}
+
+.care-user-bar label {
+  color: var(--muted);
+}
+
+.care-user-bar select {
+  flex: 1;
+  max-width: 180px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.care-user-hint {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
 .info-banner {
   margin: 0 16px 8px;
   padding: 10px 14px;

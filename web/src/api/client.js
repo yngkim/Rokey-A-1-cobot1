@@ -31,7 +31,12 @@ export async function sendVoiceCommand(text) {
         '음성 API에 연결되지 않았습니다. colcon build 후 ros2 run cobot1 care_web_api 를 재시작하세요.',
       )
     }
-    const detail = typeof data.detail === 'string' ? data.detail : data.message
+    let detail = data.message
+    if (typeof data.detail === 'string') {
+      detail = data.detail
+    } else if (Array.isArray(data.detail) && data.detail.length > 0) {
+      detail = data.detail.map((item) => item.msg || JSON.stringify(item)).join(', ')
+    }
     throw new Error(detail || `음성 명령 실패 (HTTP ${res.status})`)
   }
   return data
@@ -50,10 +55,53 @@ export async function fetchTasks() {
   return res.json()
 }
 
-export async function runTask(taskId) {
-  const res = await fetch(`${API_BASE}/api/tasks/${taskId}`, { method: 'POST' })
+export async function runTask(taskId, userId = null) {
+  const body = userId ? JSON.stringify({ user_id: userId }) : undefined
+  const res = await fetch(`${API_BASE}/api/tasks/${taskId}`, {
+    method: 'POST',
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body,
+  })
   const data = await res.json()
   if (!res.ok) throw new Error(data.detail || data.message || '실행 실패')
+  return data
+}
+
+export async function fetchCareUsers() {
+  const res = await fetch(`${API_BASE}/api/care/users`)
+  if (!res.ok) throw new Error('사용자 목록을 불러오지 못했습니다')
+  return res.json()
+}
+
+export async function fetchActiveCareUser() {
+  const res = await fetch(`${API_BASE}/api/care/active-user`)
+  if (!res.ok) throw new Error('활성 사용자를 불러오지 못했습니다')
+  return res.json()
+}
+
+export async function setActiveCareUser(userId) {
+  const res = await fetch(`${API_BASE}/api/care/active-user`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user_id: userId }),
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.detail || data.message || '사용자 설정 실패')
+  return data
+}
+
+export async function recordCareEvent(eventType, { quantity = 1, note = '' } = {}) {
+  const res = await fetch(`${API_BASE}/api/care/events`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      event_type: eventType,
+      quantity,
+      note: note || null,
+    }),
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.detail || data.message || '기록 실패')
   return data
 }
 

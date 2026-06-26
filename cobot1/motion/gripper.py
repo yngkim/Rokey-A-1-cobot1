@@ -211,19 +211,63 @@ class Gripper:
             )
 
     def open(self) -> None:
+        self._open_impl(slow=False)
+
+    def open_slow(
+        self,
+        force: float | None = None,
+        steps: int = 6,
+        step_pause_sec: float = 0.4,
+        wait_sec: float | None = None,
+    ) -> None:
+        """천천히 열기 — RG2는 너비를 단계적으로 넓히고, 그 외는 open()+대기."""
+        self._open_impl(
+            slow=True,
+            slow_force=force,
+            slow_steps=steps,
+            slow_step_pause_sec=step_pause_sec,
+            wait_sec=wait_sec,
+        )
+
+    def _open_impl(
+        self,
+        *,
+        slow: bool,
+        slow_force: float | None = None,
+        slow_steps: int = 6,
+        slow_step_pause_sec: float = 0.4,
+        wait_sec: float | None = None,
+    ) -> None:
         if self._driver == DRIVER_SIMULATED:
-            self._log("[gripper:sim] 열기")
+            self._log("[gripper:sim] 열기" + (" (slow)" if slow else ""))
         elif self._driver == DRIVER_DSR_DIGITAL:
             self._set_dsr_tool_output(False)
             self._log("[gripper:dsr] 열기")
         elif self._driver == DRIVER_ONROBOT_ROS:
             self._onrobot_ros_command("o")
             self._log("[gripper:onrobot_ros] 열기 명령 전송")
-            self._wait_for_joint_motion(closed=False)
+            settle = wait_sec
+            if slow and settle is None:
+                settle = max(self._settle, slow_steps * slow_step_pause_sec)
+            self._wait_for_joint_motion(closed=False, wait_sec=settle)
         elif self._driver == DRIVER_ONROBOT_RG2:
-            self._rg2_client().open()
-            self._log("[gripper:rg2] 열기 (modbus)")
-            self._wait_for_joint_motion(closed=False)
+            if slow:
+                self._rg2_client().open_slow(
+                    force=slow_force,
+                    steps=slow_steps,
+                    step_pause_sec=slow_step_pause_sec,
+                )
+                self._log(
+                    f"[gripper:rg2] 천천히 열기 (force={slow_force}, "
+                    f"steps={slow_steps}, pause={slow_step_pause_sec}s)"
+                )
+            else:
+                self._rg2_client().open()
+                self._log("[gripper:rg2] 열기 (modbus)")
+            settle = wait_sec
+            if slow and settle is None:
+                settle = max(self._settle, slow_steps * slow_step_pause_sec * 0.5)
+            self._wait_for_joint_motion(closed=False, wait_sec=settle)
         else:
             raise MotionError(
                 f"알 수 없는 gripper.driver: {self._driver}",

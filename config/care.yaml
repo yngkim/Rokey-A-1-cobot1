@@ -1,0 +1,11 @@
+# 케어 사용자 및 일일 목표 (관리자 모니터링)
+default_users:
+  - id: patient_01
+    name: 홍길동
+  - id: patient_02
+    name: 김영희
+
+daily_targets:
+  medication_prepare: 3   # 로봇 약 준비 목표(회)
+  medication_taken: 3     # 복용 완료 목표(회)
+  meals: 3                # 식사 목표(회) — 추후 자동 연동 예정

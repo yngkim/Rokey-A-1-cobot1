@@ -1,5 +1,6 @@
 """관리자 REST API 라우트 등록."""
 
+from datetime import datetime
 from typing import Any
 
 from cobot1.bridge.admin_auth import (
@@ -8,11 +9,21 @@ from cobot1.bridge.admin_auth import (
     validate_session,
     verify_password,
 )
+from cobot1.bridge.care_store import (
+    EVENT_MEAL,
+    EVENT_MEDICATION_PREPARE,
+    EVENT_MEDICATION_TAKEN,
+    get_care_store,
+)
 from cobot1.bridge.event_store import get_event_store
 from cobot1.config_loader import load_scenarios
 from cobot1.robot_config import ROBOT_ID
 
 SESSION_COOKIE = "cobot1_admin_session"
+
+
+def _today_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
 
 
 def register_admin_routes(app, bridge_holder: dict) -> None:
@@ -24,6 +35,18 @@ def register_admin_routes(app, bridge_holder: dict) -> None:
 
     class MaintenanceRequest(BaseModel):
         enabled: bool
+
+    class CareUserRequest(BaseModel):
+        id: str
+        name: str
+
+    class AdminCareEventRequest(BaseModel):
+        user_id: str
+        event_type: str
+        quantity: float = 1.0
+        unit: str = "dose"
+        note: str | None = None
+        date: str | None = None
 
     def _bridge():
         bridge = bridge_holder.get("bridge")
@@ -193,3 +216,76 @@ def register_admin_routes(app, bridge_holder: dict) -> None:
     @app.post("/api/admin/force_idle")
     def admin_force_idle(_: str = Depends(require_admin)):
         return _bridge().force_idle(actor="admin")
+
+    @app.get("/api/admin/care/users")
+    def admin_care_users(_: str = Depends(require_admin)):
+        return {"users": get_care_store().list_users()}
+
+    @app.post("/api/admin/care/users")
+    def admin_care_create_user(
+        body: CareUserRequest,
+        _: str = Depends(require_admin),
+    ):
+        user = get_care_store().ensure_user(body.id.strip(), body.name.strip())
+        get_event_store().audit(
+            "care_user_upsert",
+            actor="admin",
+            detail={"user_id": user["id"], "name": user["name"]},
+        )
+        return {"user": user}
+
+    @app.get("/api/admin/care/daily")
+    def admin_care_daily(
+        user_id: str,
+        date: str | None = None,
+        _: str = Depends(require_admin),
+    ):
+        try:
+            summary = get_care_store().get_daily_summary(user_id, date)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return summary
+
+    @app.get("/api/admin/care/overview")
+    def admin_care_overview(
+        date: str | None = None,
+        _: str = Depends(require_admin),
+    ):
+        return {
+            "date": date or _today_str(),
+            "users": get_care_store().list_daily_overview(date),
+        }
+
+    @app.post("/api/admin/care/events")
+    def admin_care_record_event(
+        body: AdminCareEventRequest,
+        _: str = Depends(require_admin),
+    ):
+        if body.event_type not in (
+            EVENT_MEDICATION_PREPARE,
+            EVENT_MEDICATION_TAKEN,
+            EVENT_MEAL,
+        ):
+            raise HTTPException(status_code=400, detail="지원하지 않는 이벤트 유형입니다")
+        try:
+            event = get_care_store().record_event(
+                user_id=body.user_id,
+                event_type=body.event_type,
+                quantity=body.quantity,
+                unit=body.unit,
+                note=body.note,
+                source="admin",
+                event_date=body.date,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        get_event_store().audit(
+            "care_event",
+            actor="admin",
+            detail={
+                "user_id": body.user_id,
+                "event_type": body.event_type,
+                "quantity": body.quantity,
+            },
+        )
+        return {"ok": True, "event": event}

@@ -16,6 +16,30 @@ from cobot1.motion.gripper import Gripper
 from cobot1.motion.safety import SafetyGuard
 
 
+def _normalize_joint_angle(deg: float) -> float:
+    while deg > 180.0:
+        deg -= 360.0
+    while deg < -180.0:
+        deg += 360.0
+    return deg
+
+
+def _j6_delta_deg(current: float, reference: float) -> float:
+    return _normalize_joint_angle(current - reference)
+
+
+def _j6_needs_unwind(
+    j6: float,
+    ref_j6: float,
+    *,
+    abs_limit_deg: float,
+    delta_limit_deg: float,
+) -> bool:
+    if abs(j6) > abs_limit_deg:
+        return True
+    return abs(_j6_delta_deg(j6, ref_j6)) > delta_limit_deg
+
+
 @dataclass
 class MotionContext:
     node: Node
@@ -142,7 +166,7 @@ class RobotMotion:
 
         api = import_dsr_api()
         pos, _sol = api["get_current_posx"](ref=self.DR_BASE)
-        if pos is None or pos == 0:
+        if pos is None or (isinstance(pos, int) and pos in (-1, 0)):
             raise MotionError(
                 "TCP 위치를 읽을 수 없습니다.",
                 code="POSE_READ_FAILED",
@@ -168,8 +192,8 @@ class RobotMotion:
         from cobot1.motion.dsr_imports import import_dsr_api
 
         api = import_dsr_api()
-        pos, _sol = api["get_current_posj"]()
-        if pos is None or pos == 0:
+        pos = api["get_current_posj"]()
+        if pos is None or (isinstance(pos, int) and pos in (-1, 0)):
             raise MotionError(
                 "조인트 위치를 읽을 수 없습니다.",
                 code="JOINT_READ_FAILED",
@@ -686,6 +710,46 @@ class RobotMotion:
             )
             if pause_sec > 0 and index < steps - 1:
                 self.interruptible_sleep(pause_sec)
+
+    def rotate_tool_z_steps_guarded(
+        self,
+        total_deg: float,
+        steps: int,
+        label_prefix: str,
+        task: str,
+        pause_sec: float = 0.15,
+        rise_total_mm: float = 0.0,
+        vel: Sequence[float] | None = None,
+        acc: Sequence[float] | None = None,
+        *,
+        j6_abs_limit_deg: float = 170.0,
+        j6_delta_limit_deg: float = 120.0,
+        on_j6_unwind: Callable[[], None] | None = None,
+    ) -> None:
+        """툴 Z 회전을 1스텝씩 수행하며 J6 한계 근접 시 unwind 콜백 호출."""
+        if steps <= 0:
+            raise MotionError("twist_steps는 1 이상이어야 합니다")
+        step_angle = total_deg / steps
+        rise_per_step = rise_total_mm / steps
+        ref_j6 = self.get_current_joint()[5]
+        for index in range(steps):
+            self._check_cancel()
+            self.move_relative_tool(
+                [0.0, 0.0, -rise_per_step, 0.0, 0.0, step_angle],
+                f"{label_prefix}_{index + 1}", task,
+                vel=vel, acc=acc,
+            )
+            if pause_sec > 0 and index < steps - 1:
+                self.interruptible_sleep(pause_sec)
+            j6 = self.get_current_joint()[5]
+            if on_j6_unwind is not None and _j6_needs_unwind(
+                j6,
+                ref_j6,
+                abs_limit_deg=j6_abs_limit_deg,
+                delta_limit_deg=j6_delta_limit_deg,
+            ):
+                on_j6_unwind()
+                ref_j6 = self.get_current_joint()[5]
 
     def safe_abort(self, task: str, reason: str, code: str = "SAFE_ABORT") -> None:
         alarm = self._safety.get_last_alarm_text()

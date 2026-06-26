@@ -24,6 +24,7 @@ def _ensure_registry() -> None:
     from cobot1.tasks.close_bottle import CloseBottleTask
     from cobot1.tasks.go_home import GoHomeTask
     from cobot1.tasks.open_bottle import OpenBottleTask
+    from cobot1.tasks.measure_tray_weight import MeasureTrayWeightTask
     from cobot1.tasks.pick_from_charger import PickFromChargerTask
     from cobot1.tasks.pick_place_pill import PickPlacePillTask
     from cobot1.tasks.place_on_charger import PlaceOnChargerTask
@@ -37,6 +38,7 @@ def _ensure_registry() -> None:
         PickPlacePillTask,
         PlaceOnChargerTask,
         PickFromChargerTask,
+        MeasureTrayWeightTask,
     ):
         register_task(task_cls)
 

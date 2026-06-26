@@ -1,6 +1,13 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { forceIdle, runTask } from './api/client'
+import {
+  fetchActiveCareUser,
+  fetchCareUsers,
+  forceIdle,
+  recordCareEvent,
+  runTask,
+  setActiveCareUser,
+} from './api/client'
 import SafetyAlertModal from './components/SafetyAlertModal'
 import RunningDock from './components/RunningDock'
 import VoiceButton from './components/VoiceButton'
@@ -35,6 +42,16 @@ function TaskButton({ task, disabled, hint, onRun }) {
   )
 }
 
+function phoneTaskHint(taskId, phoneLocation) {
+  if (taskId === 'pick_from_charger' && phoneLocation === 'with_user') {
+    return '핸드폰은 이미 가져가셨어요'
+  }
+  if (taskId === 'place_on_charger' && phoneLocation === 'on_charger') {
+    return '핸드폰은 이미 거치대에 있어요'
+  }
+  return ''
+}
+
 function connectionLabel(apiOnline, robotReady) {
   if (!apiOnline) return { text: 'API 미연결', className: 'off' }
   if (!robotReady) return { text: '로봇 대기', className: 'warn' }
@@ -46,12 +63,17 @@ export default function CareApp() {
   const speechRef = useRef(speech)
   speechRef.current = speech
 
+  const [careUsers, setCareUsers] = useState([])
+  const [activeUserId, setActiveUserId] = useState('')
+  const [activeUserName, setActiveUserName] = useState('')
+
   const {
     tasks,
     apiOnline,
     robotReady,
     busy,
     maintenance,
+    phoneLocation,
     stopping,
     resetting,
     activeTaskLabel,
@@ -67,14 +89,52 @@ export default function CareApp() {
     markVoiceChainStarted,
   } = useRobotApp(speechRef)
 
+  useEffect(() => {
+    if (!apiOnline) return
+    Promise.all([fetchCareUsers(), fetchActiveCareUser()])
+      .then(([usersRes, activeRes]) => {
+        setCareUsers(usersRes.users || [])
+        const user = activeRes.user
+        if (user) {
+          setActiveUserId(user.id)
+          setActiveUserName(user.name)
+        }
+      })
+      .catch(() => {})
+  }, [apiOnline])
+
+  const handleUserChange = async (userId) => {
+    try {
+      const result = await setActiveCareUser(userId)
+      setActiveUserId(result.user.id)
+      setActiveUserName(result.user.name)
+      showToast(`${result.user.name} 사용자로 설정되었습니다`, 'info')
+    } catch (err) {
+      showToast(err.message, 'error')
+    }
+  }
+
+  const handleCareLog = async (eventType, label) => {
+    try {
+      await recordCareEvent(eventType, { quantity: 1 })
+      showToast(`${label} 기록되었습니다`, 'info')
+    } catch (err) {
+      showToast(err.message, 'error')
+    }
+  }
+
   const handleVoiceResult = useCallback(
-    async (result) => {
+    async (result, heardText) => {
       if (result.speech) {
         await speech.speakFromResponse(result.speech)
       }
 
       if (!result.matched) {
-        showToast('인식된 명령이 없습니다', 'info')
+        const heard = heardText || result.heard_text || ''
+        showToast(
+          heard ? `인식: 「${heard}」 — 등록된 명령이 없습니다` : '인식된 명령이 없습니다',
+          'info',
+        )
         return
       }
 
@@ -82,10 +142,18 @@ export default function CareApp() {
         if (result.command_id === 'prepare_medication') {
           markVoiceChainStarted('prepare_medication')
         } else {
-          markTaskStarted(result.command_id || '')
+          markTaskStarted(result.task_id || result.command_id || '')
         }
         showToast(result.message || '작업을 시작했습니다')
         refreshHealth()
+        return
+      }
+
+      if (
+        result.code === 'PHONE_WITH_USER' ||
+        result.code === 'PHONE_ON_CHARGER'
+      ) {
+        showToast(result.message || '지금은 실행할 수 없습니다', 'info')
         return
       }
 
@@ -143,7 +211,7 @@ export default function CareApp() {
 
   const handleRun = async (taskId) => {
     try {
-      const result = await runTask(taskId)
+      const result = await runTask(taskId, activeUserId || null)
       if (result.success) {
         if (taskId === 'prepare_medication' || result.chain) {
           markVoiceChainStarted('prepare_medication')
@@ -185,6 +253,25 @@ export default function CareApp() {
         <div className={`conn-badge ${conn.className}`}>{conn.text}</div>
       </header>
 
+      {apiOnline && careUsers.length > 0 && (
+        <div className="care-user-bar">
+          <label htmlFor="care-user-select">사용자</label>
+          <select
+            id="care-user-select"
+            value={activeUserId}
+            onChange={(e) => handleUserChange(e.target.value)}
+            disabled={busy}
+          >
+            {careUsers.map((u) => (
+              <option key={u.id} value={u.id}>
+                {u.name}
+              </option>
+            ))}
+          </select>
+          {activeUserName && <span className="care-user-hint">{activeUserName}님</span>}
+        </div>
+      )}
+
       {!apiOnline && (
         <div className="info-banner">
           웹 API 서버가 꺼져 있습니다.
@@ -224,18 +311,47 @@ export default function CareApp() {
             <div className="task-grid">
               {tasks
                 .filter((t) => t.group === group)
-                .map((task) => (
+                .map((task) => {
+                  const phoneHint = phoneTaskHint(task.id, phoneLocation)
+                  return (
                   <TaskButton
                     key={task.id}
                     task={task}
-                    disabled={!canRun}
-                    hint={disabledHint}
+                    disabled={!canRun || !!phoneHint}
+                    hint={phoneHint || disabledHint}
                     onRun={handleRun}
                   />
-                ))}
+                  )
+                })}
             </div>
           </section>
         ))}
+
+        <section className="task-section">
+          <h2>복약 · 식사 기록</h2>
+          <div className="task-grid">
+            <button
+              type="button"
+              className="task-btn"
+              disabled={!canRun || !activeUserId}
+              onClick={() => handleCareLog('medication_taken', '복용 완료')}
+              title={disabledHint || '복용 완료 기록'}
+            >
+              <span className="task-icon">✅</span>
+              <span className="task-label">복용 완료</span>
+            </button>
+            <button
+              type="button"
+              className="task-btn"
+              disabled={!activeUserId}
+              onClick={() => handleCareLog('meal', '식사')}
+              title="식사 1회 기록 (추후 식사량 자동 연동 예정)"
+            >
+              <span className="task-icon">🍽️</span>
+              <span className="task-label">식사 기록</span>
+            </button>
+          </div>
+        </section>
 
         <section className="task-section">
           <h2>복구</h2>

@@ -35,7 +35,7 @@ gripper:
 safety:
   enabled: true
   monitor_interval_sec: 0.1
-  external_torque_max_norm: 30.0
+  external_torque_max_norm: 50.0
   messages:
     external_force: "외력이 감지되어 동작을 중단했습니다. 환자·물체 접촉 여부를 확인해 주세요."
     unsafe_robot_state: "로봇이 안전 정지 상태입니다. 티칭 팬던트 알람을 확인해 주세요."
@@ -52,7 +52,8 @@ water_poses:
   cup_pour_upright:     [621.23, 223.91, 254.59, 89.72, -90.03, 94.44]      # pos4 컵 옆, 세운 상태
   cup_pour_tilt:        [629.58, 219.77, 237.85, 92.95, -98.99, 37.36]      # pos5 최대 기울임
   lift_clearance_mm: 120.0   # 픽앤플레이스 시 베이스 Z 상승 여유
-  bottle_height_offset_mm: 0.0  # 물병 높이 Z 보정(기존 병 기준 0)
+  bottle_height_offset_mm: 13.0  # 새 물병이 기존 대비 약 1.3cm 높음 (open/pour/close 공용 Z 보정)
+  cap_grasp_extra_descent_mm: 4.0  # 뚜껑 파지 시 티칭 Z 대비 추가 하강 (open/close 공용)
 
 # 1. 페트병 뚜껑 열기 (툴 +Z 상대 이동 방식)
 open_bottle:
@@ -76,17 +77,26 @@ open_bottle:
   fast_joint_acc: 60.0
 
   # 뚜껑 개봉 파라미터
-  twist_angle_deg: -200.0  # 총 회전각 (deg, 음수 = 열리는 방향)
-  twist_steps: 8            # 단계 수
-  twist_rise_mm: 5.0        # 개봉 중 상승 거리 (나사산 피치, mm)
-  cap_lift_mm: 30.0         # 개봉 후 추가 들어올리기 (mm, 툴 -Z)
+  twist_angle_deg: -323.1  # 총 회전각 (9스텝, 10→9)
+  twist_steps: 9            # 단계 수
+  twist_rise_mm: 8.0        # 개봉 중 상승 거리
+  cap_lift_mm: 30.0         # 개봉 후 베이스 Z 수직 들어올리기 (mm)
+  cap_grasp_force: 400.0              # 개봉 직전 재파지 힘 (gripper.force)
+  cap_grasp_force_after_open: 100.0    # 개봉 후 재파지 힘 (75% 감소, 바닥까지 유지)
+  cap_grasp_regrasp_wait_sec: 2.0     # 약파지 후 대기(초)
+  cap_release_open_force: 80.0        # 개봉 후 재파지 전 그리퍼 열기 힘 (낮을수록 부드러움)
+  cap_release_open_steps: 6           # 열기 단계 수 (많을수록 천천히)
+  cap_release_open_step_pause_sec: 0.4 # 단계마다 대기(초)
+  pre_release_descent_mm: 5.0         # 개봉 후 재파지 전 베이스 Z 하강 (mm)
 
   # 뚜껑 내려놓기 위치: home([0,0,90,0,90,0]) TCP 기준 X+0/Y-20 바닥
   # cap_place_floor_z_mm: 뚜껑 잡은 그리퍼가 바닥에 닿는 Z(mm). 이 값 이하로 절대 내려가지 않음
   cap_place_floor_z_mm: 237.0
   cap_place_approach_z_mm: 50.0
-  holder_place_extra_mm: 6.0   # 컵홀더 안착 시 티칭 Z 보다 더 하강 (11→6: 놓는 높이 +5mm)
+  cap_place_extra_descent_mm: 2.0  # 바닥 안착 시 floor_z 대비 추가 하강 후 그리퍼 열기
+  holder_place_extra_mm: 11.0  # 컵홀더 안착 시 티칭 Z 보다 더 하강 (+5mm: 6→11)
   regrasp_lift_mm: 100.0       # 병 놓은 뒤 재파지·개봉 전 수직 상승(약 10cm)
+  open_grasp_extra_descent_mm: 8.0  # 개봉 직전 재파지 시 티칭 Z 대비 추가 하강(약 0.8cm)
 
 # 1-2. 페트병 뚜껑 닫기 (open_bottle 역순) — 뚜껑이 바닥에 놓여 있다고 가정
 # open_bottle 과 동일한 좌표/파라미터를 사용해야 같은 위치에서 뚜껑을 집는다.
@@ -99,15 +109,39 @@ close_bottle:
   fast_acc: [200, 150]
   fast_joint_vel: 60.0
   fast_joint_acc: 60.0
-  twist_angle_deg: -200.0   # open_bottle 과 동일 (닫기는 코드에서 부호 반전, 2스텝 적게 조임)
-  twist_steps: 8
-  twist_rise_mm: 5.0        # 나사산 피치 (닫기 시 동일 거리만큼 하강)
+  twist_angle_deg: -323.1   # open_bottle 과 동일 (닫기는 코드에서 부호 반전)
+  twist_steps: 9
+  twist_rise_mm: 8.0         # 나사산 피치 (닫기 시 동일 거리만큼 하강)
+  screw_close_add_steps: 1    # 조임 회전 스텝 추가 (기본 twist_steps-2=7 → 8스텝, 이전 대비 -4)
   grip_force: 100.0         # 바닥 뚜껑 약파지 힘(낮을수록 뚜껑 변형↓, 최대 ~400)
   grasp_settle_sec: 2.0     # 약파지 후 상승 전 대기(그리퍼 완전히 닫힐 때까지, RG2 피드백 없음)
   regrasp_force: 400.0      # 닫은 뒤 물병 이송 전 뚜껑 강파지 힘(미끄럼 방지)
   drop_clearance_mm: 10.0   # 병 입구 위 떨어뜨릴 높이(약 1cm)
   floor_pick_extra_mm: 5.0  # 바닥 뚜껑 파지 시 floor_z 보다 더 내려가는 깊이(약 0.5cm)
+  floor_pick_raise_mm: 2.0   # 바닥 파지 Z 보정 (올림, mm)
   water_place_offset_z_mm: 5.0  # 닫은 뒤 초기 위치 내려놓기 Z 여유(외력 감지 방지)
+  screw_start_offset_x_mm: -3.0  # 조임 하강/회전 X 평행이동 (-3mm, cupholder_cap_close_start 기준)
+  screw_start_offset_y_mm: 3.0   # 조임 하강/회전 Y 평행이동 (+3mm)
+  screw_close_joint: [1.43, -0.38, 87.49, -0.91, 92.13, 249.24]  # 조임 직전 조인트(deg) → fkin TCP 목표
+  # 사전 정렬 (조임 전: 살살 놓기 → 상승 → 중앙 누르기)
+  cap_preseat_open_force: 80.0
+  cap_preseat_open_steps: 6
+  cap_preseat_open_pause_sec: 0.4
+  cap_preseat_lift_mm: 80.0
+  cap_press_approach_z_mm: 25.0
+  cap_press_force_threshold_z: 35.0   # ΔFz 정지 (N)
+  cap_press_max_force_z: 38.0
+  cap_press_step_mm: 0.3
+  cap_press_vel: [3, 2]
+  cap_press_acc: [6, 4]
+  cap_press_max_travel_mm: 40.0
+  cap_screw_grasp_force: 400.0
+  cap_screw_grasp_wait_sec: 2.0
+  # J6 가드 조임 (한계 근접 시 그리퍼 열고 J6 복원 후 재파지)
+  screw_j6_abs_limit_deg: 170.0
+  screw_j6_delta_limit_deg: 120.0
+  screw_j6_restore_deg: 249.24
+  screw_j6_unwind_joint_vel: 15.0
   cap_place_floor_z_mm: 237.0
   cap_place_approach_z_mm: 50.0
 
@@ -120,10 +154,16 @@ go_home:
 # 포즈는 조인트 각도(deg). 컵/복귀 이송은 fkin TCP + Z↑→XY→Z↓
 pour_water:
   body_grasp_joint: [-41.99, 44.05, 101.32, 52.69, 112.6, -63.1]   # 컵홀더 몸통 파지
-  cup_side_joint:   [19.84, 35.26, 116.6, 106.22, 81.39, -63.12]     # 컵 옆 세운 상태
-  # pour_tilt_joint: 참고용 티칭값 (코드 미사용 — J6 상대 회전 pour_tilt_delta_j6_deg 사용)
-  pour_tilt_delta_j6_deg: -80.0  # cup_side J6 기준 최대 기울임(부호·크기 현장 튜닝)
-  pour_fast_zone_deg: 30.0       # 입구 구간(0↔±30, ±80↔±50) 빠른 기울임 각도
+  body_grasp_z_offset_mm: -40.0   # 몸통 파지 TCP Z 추가 하강 (나머지 포즈는 동일)
+  body_grasp_y_offset_mm: 10.0    # 몸통 파지 TCP Y 추가 이동 (+1cm)
+  cup_side_joint:      [19.84, 35.26, 116.6, 106.22, 81.39, -63.12]    # 컵 옆 세운 상태
+  cup_pour_tilt_joint: [19.84, 35.26, 116.6, 106.22, 81.39, -180.12]   # 컵 옆 최대 기울임
+  # pour_tilt_delta_j6_deg: 미지정 시 cup_pour_tilt_joint J6 − cup_side_joint J6
+  pour_j6_pre_rotate_vel: 10.0   # align_body_grasp / align_cup_joints 속도
+  pour_j6_pre_rotate_acc: 10.0
+  pour_j6_restore_vel: 60.0       # 붓기 후 J6 복원 속도
+  pour_j6_restore_acc: 60.0
+  pour_fast_zone_deg: 30.0       # 입구 구간(0↔±30, ±135↔±105) 빠른 기울임 각도
   pour_joint_vel: 8.0            # 느린 구간 속도
   pour_joint_acc: 8.0
   pour_fast_joint_vel: 30.0      # 빠른 구간 속도
@@ -136,10 +176,8 @@ pour_water:
   fast_acc: [200, 150]
   fast_joint_vel: 60.0
   fast_joint_acc: 60.0
-  body_grip_force: 100.0              # 초기 몸통 파지 힘 (~10N, RG2 0.1N 단위)
+  body_grip_force: 170.0              # 초기 몸통 파지 힘 (~17N, RG2 0.1N 단위)
   body_grip_width_units: 0            # 목표 너비(0.01mm). 0=완전 닫힘
-  body_grip_force_after_pour: 80.0    # 따른 뒤 힘만 낮춤 (~8N). width=0 유지, 벌리지 않음
-  body_grip_relax_wait_sec: 1.0       # 힘 변경 후 대기(초)
   body_grasp_settle_sec: 4.5            # 초기 파지 최소 대기(초) + busy 해제
   pour_duration_sec: 3.0
   pre_pour_pause_sec: 0.5
@@ -190,11 +228,19 @@ _phone_charger_common: &phone_charger_common
   user_handoff_joint: [30.91, 24.51, 88.49, 17.75, 5.03, -111.1]
   grip_force: 300              # 30N (0.1N 단위)
   grip_settle_sec: 3.0
-  nudge_force_threshold: 15.0
-  nudge_hold_sec: 0.3
-  nudge_timeout_sec: 120.0
-  compliance_stiffness: [80, 80, 80, 40, 40, 40]
-  compliance_ramp_sec: 0.3
+  nudge_force_delta: 8.0            # N — baseline 대비 TCP X/Y/Z 증가량
+  nudge_hold_sec: 0.4
+  nudge_settle_sec: 1.0               # 순응 안정화 대기(초)
+  nudge_timeout_sec: 120.0          # pick 인계 대기 최대(초), place는 0=무제한
+  handoff_grasp_timeout_sec: 0      # place: 사용자 앞 대기 — 0=시간 제한 없음
+  nudge_poll_sec: 0.05
+  nudge_baseline_samples: 18
+  nudge_baseline_interval_sec: 0.08
+  handoff_auto_release_sec: 15.0  # pick: 인계 대기 후 자동 진행(초)
+  handoff_compliance_stiffness: [40, 40, 40, 60, 60, 60]  # TCP X/Y/Z 순응 (인계 nudge)
+  handoff_compliance_ref: 1        # DR_TOOL — Nudge 인계 순응 좌표계
+  compliance_stiffness: [800, 800, 40, 60, 60, 60]
+  compliance_ramp_sec: 0.5
   home_joint_vel: 12.0
   home_joint_acc: 12.0
   approach_joint_vel: 12.0
@@ -203,8 +249,10 @@ _phone_charger_common: &phone_charger_common
   charger_grasp_approach_joint_acc: 5.0
   carry_joint_vel: 10.0
   carry_joint_acc: 10.0
-  return_home_joint_vel: 8.0
-  return_home_joint_acc: 8.0
+  handoff_return_joint_vel: 18.0   # 인계 후 복귀 (준비포즈→J4→J5)
+  handoff_return_joint_acc: 18.0
+  return_home_joint_vel: 12.0
+  return_home_joint_acc: 12.0
   lift_clearance_mm: 150.0
   post_grasp_lift_mm: 200.0      # 거치대 파지 후 수직 상승 (mm)
   carry_lift_clearance_mm: 200.0 # 파지 후 이송 시 Z 회피 높이
@@ -215,6 +263,29 @@ _phone_charger_common: &phone_charger_common
 
 pick_from_charger:
   <<: *phone_charger_common
+  charger_grasp_joint: [-4.39, 34.79, 95.87, 77.0, -34.75, 35.33]
+  charger_grasp_tcp_z_advance_mm: 5.0   # 파지 전 TCP Z +0.5cm
+  nudge_force_delta: 6.4              # 공통 8.0N 대비 20% 낮춤 — 인계(받기) 감지
 
 place_on_charger:
   <<: *phone_charger_common
+  nudge_force_delta: 4.0              # 그리퍼 열린 채 인계 감지
+  charger_front_joint: [-2.8, 29.27, 87.8, 111.76, -38.5, 0.66]       # 거치대 앞
+  charger_place_joint: [-4.39, 34.79, 95.87, 77.0, -34.75, 35.33]    # 거치대 놓기
+  charger_place_return_joint_vel: 24.0   # 거치대 놓고 복귀 (준비→J4→J5)
+  charger_place_return_joint_acc: 24.0
+  charger_place_home_joint_vel: 20.0     # 최종 home
+  charger_place_home_joint_acc: 20.0
+
+# 5. 식판 무게 측정 (식전/식후 % 섭취율) — 그리퍼가 식판을 잡은 상태 전제
+measure_tray_weight:
+  weigh_joint: [30.91, 24.51, 88.49, 17.75, 5.03, -111.1]  # 초기값: user_handoff_joint, 현장 티칭 필요
+  weigh_joint_vel: 10.0
+  weigh_joint_acc: 10.0
+  settle_sec: 2.0
+  sample_count: 12
+  sample_interval_sec: 0.08
+  min_load_n: 2.0
+  phase_mode: auto
+  go_home_first: false
+  care_user_id: patient_01

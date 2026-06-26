@@ -7,9 +7,8 @@
   home → 초기 물통 위 접근 → 하강해 '뚜껑' 파지
   → 컵홀더로 이송(Z↑→XY→Z↓, 자세 고정)해 안착 → 그리퍼 열어 병 두기
   → 개봉 직전 포즈 XY 맞춤 → Z 하강해 재파지
-  → J6 회전 + 동시 상승으로 개봉(뚜껑 분리)
-  → 들어올리기 → home TCP 기준 X+0/Y-100 수평 이동 → 손목 원위치
-  → 바닥(z=floor_z)까지 수직 하강해 내려놓기 → 안착 TCP 포즈 저장
+  → J6 회전으로 개봉 → 5mm 하강 → 그리퍼 열기·약파지(100) 재파지 → Z 들어올리기
+  → home J6 복원 → Y축 이동 → 바닥 하강 → 그리퍼 열기(바닥 안착 후만)
   → 상승 후 home 복귀
 
 티칭:
@@ -19,8 +18,17 @@
 
 from __future__ import annotations
 
+from cobot1.motion.pose_utils import offset_pose_z
 from cobot1.runtime_state import save_cap_place_pose
 from cobot1.tasks.base import BaseTask
+
+
+def _normalize_joint_angle(deg: float) -> float:
+    while deg > 180.0:
+        deg -= 360.0
+    while deg < -180.0:
+        deg += 360.0
+    return deg
 
 
 class OpenBottleTask(BaseTask):
@@ -35,14 +43,28 @@ class OpenBottleTask(BaseTask):
         motion.set_recovery_joint(home_joint)
 
         wp = self._scenarios["water_poses"]
-        pos_water_cap = list(wp["water_cap_grasp"])          # pos1
-        pos_cupholder_cap = list(wp["cupholder_cap_grasp"])  # pos2
-        pos_open_start = list(wp["cupholder_cap_open_start"])  # 개봉 직전 TCP
+        bottle_dz = float(wp.get("bottle_height_offset_mm", 0.0))
+        cap_grasp_extra = float(wp.get("cap_grasp_extra_descent_mm", 0.0))
+        pos_water_cap = offset_pose_z(wp["water_cap_grasp"], bottle_dz - cap_grasp_extra)  # pos1
+        pos_cupholder_cap = offset_pose_z(wp["cupholder_cap_grasp"], bottle_dz)      # pos2
+        open_grasp_extra = float(cfg.get("open_grasp_extra_descent_mm", 0.0))
+        pos_open_start = offset_pose_z(
+            wp["cupholder_cap_open_start"],
+            bottle_dz - open_grasp_extra - cap_grasp_extra,
+        )  # 개봉 직전 TCP (재파지 높이)
         lift = float(wp.get("lift_clearance_mm", 120.0))
         holder_place_extra = float(cfg.get("holder_place_extra_mm", 6.0))
         regrasp_lift = float(cfg.get("regrasp_lift_mm", 100.0))
 
-        cap_lift      = float(cfg.get("cap_lift_mm", 30.0))
+        cap_lift = float(cfg.get("cap_lift_mm", 30.0))
+        grip_cfg = self._scenarios.get("gripper", {})
+        cap_grasp_force = float(cfg.get("cap_grasp_force", grip_cfg.get("force", 400)))
+        cap_grasp_force_after_open = float(cfg.get("cap_grasp_force_after_open", 100.0))
+        cap_grasp_regrasp_wait = float(cfg.get("cap_grasp_regrasp_wait_sec", 2.0))
+        cap_release_open_force = float(cfg.get("cap_release_open_force", 80.0))
+        cap_release_open_steps = int(cfg.get("cap_release_open_steps", 6))
+        cap_release_open_pause = float(cfg.get("cap_release_open_step_pause_sec", 0.4))
+        pre_release_descent = float(cfg.get("pre_release_descent_mm", 5.0))
         grasp_vel = list(cfg.get("grasp_vel", [15, 10]))   # 섬세 작업(느림)
         grasp_acc = list(cfg.get("grasp_acc", [30, 15]))
         fast_vel  = list(cfg.get("fast_vel", [80, 60]))    # 일반 이동(빠름)
@@ -52,12 +74,13 @@ class OpenBottleTask(BaseTask):
 
         floor_z = float(cfg.get("cap_place_floor_z_mm", 237.0))
         place_approach_z = float(cfg.get("cap_place_approach_z_mm", 50.0))
+        cap_place_extra = float(cfg.get("cap_place_extra_descent_mm", 2.0))
+        place_floor_z = floor_z - cap_place_extra
         twist_angle = float(cfg["twist_angle_deg"])
 
         # 뚜껑 놓을 위치: home_joint TCP 기준 X+0/Y-100 (바닥)
         from cobot1.motion.dsr_imports import import_dsr_api
         home_tcp = [float(v) for v in import_dsr_api()["fkin"](home_joint)]
-        place_x = home_tcp[0] + 0.0
         place_y = home_tcp[1] - 100.0
 
         def _release_compliance() -> None:
@@ -142,33 +165,60 @@ class OpenBottleTask(BaseTask):
                 acc=grasp_acc,
             )
 
+        def _descend_before_regrasp() -> None:
+            """개봉 직후 재파지 전 5mm 하강 — 뚜껑·그리퍼 정렬."""
+            motion.move_base_z_delta(
+                -pre_release_descent, "descend_before_regrasp", task,
+                vel=grasp_vel, acc=grasp_acc,
+            )
+
+        def _release_after_open() -> None:
+            """개봉 직후 그 자리에서 그리퍼를 천천히 연다 — 조임 힘 해제 후 재파지 준비."""
+            motion.gripper.open_slow(
+                force=cap_release_open_force,
+                steps=cap_release_open_steps,
+                step_pause_sec=cap_release_open_pause,
+            )
+
+        def _regrasp_cap_light() -> None:
+            """개봉된 뚜껑을 약한 힘으로 같은 자리에서 재파지 (이후 바닥까지 유지)."""
+            motion.publish_status(
+                task, "regrasp_cap_light", "running",
+                f"약파지 (force={cap_grasp_force_after_open:.0f})",
+            )
+            motion.gripper.grip(
+                force=cap_grasp_force_after_open,
+                width_units=0,
+                wait_sec=cap_grasp_regrasp_wait,
+            )
+            motion.publish_status(task, "regrasp_cap_light", "done")
+
         def _lift_cap() -> None:
-            """개봉한 뚜껑을 툴 -Z로 들어올려 병에서 분리 확보."""
-            motion.move_relative_tool(
-                [0.0, 0.0, -cap_lift, 0.0, 0.0, 0.0],
-                "lift_cap", task,
-                vel=fast_vel, acc=fast_acc,
+            """개봉한 뚜껑을 베이스 Z로 수직 들어올려 병에서 분리 확보."""
+            motion.move_base_z_delta(cap_lift, "lift_cap", task,
+                                     vel=fast_vel, acc=fast_acc)
+
+        def _restore_home_j6() -> None:
+            """개봉으로 J6 한계까지 돈 뒤 home 조인트의 J6 각도로만 복원."""
+            joints = motion.get_current_joint()
+            target = list(joints)
+            target[5] = _normalize_joint_angle(home_joint[5])
+            motion.movej_joint(
+                target, "restore_home_j6", task,
+                vel=fast_jvel, acc=fast_jacc,
             )
 
-        def _unrotate_cap() -> None:
-            """개봉으로 돌아간 손목을 원자세로 되돌림(바닥에 놓기 전)."""
-            motion.move_relative_tool(
-                [0.0, 0.0, 0.0, 0.0, 0.0, -twist_angle],
-                "unrotate_cap", task,
-                vel=fast_vel, acc=fast_acc,
-            )
-
-        def _approach_cap_place() -> None:
-            """먼저 수평(X+0/Y-100)으로만 이동 — 현재 높이·자세 유지, 손목 회전 없음."""
+        def _move_place_y() -> None:
+            """Y축만 이동해 바닥 안착 Y로 이격 — X·Z·자세 유지."""
             cur = motion.get_current_tcp_pose()
-            target = [place_x, place_y, cur[2], cur[3], cur[4], cur[5]]
-            motion.move_task_pose(target, "approach_cap_place", task,
+            target = [cur[0], place_y, cur[2], cur[3], cur[4], cur[5]]
+            motion.move_task_pose(target, "move_place_y", task,
                                   vel=fast_vel, acc=fast_acc)
 
         def _place_cap_down() -> None:
-            """수평 이동 후 그 자리에서 Z만 바닥(floor_z)까지 수직 하강 — 자세 유지, floor_z 이하로 절대 내려가지 않음."""
+            """현재 XY에서 Z만 바닥(floor_z)보다 cap_place_extra 만큼 더 하강."""
             cur = motion.get_current_tcp_pose()
-            target = [place_x, place_y, floor_z, cur[3], cur[4], cur[5]]
+            target = [cur[0], cur[1], place_floor_z, cur[3], cur[4], cur[5]]
             motion.move_task_pose(target, "place_cap_down", task,
                                   vel=grasp_vel, acc=grasp_acc)
 
@@ -182,10 +232,14 @@ class OpenBottleTask(BaseTask):
                 f"(x={pose[0]:.1f}, y={pose[1]:.1f}, z={pose[2]:.1f})",
             )
 
+        def _release_cap_on_floor() -> None:
+            """바닥에 내려놓은 뒤에만 그리퍼를 연다."""
+            motion.gripper.open()
+
         def _retract_from_place() -> None:
             """뚜껑 놓은 뒤 approach 높이로 복귀 — 자세 유지."""
             cur = motion.get_current_tcp_pose()
-            target = [place_x, place_y, floor_z + place_approach_z, cur[3], cur[4], cur[5]]
+            target = [cur[0], cur[1], floor_z + place_approach_z, cur[3], cur[4], cur[5]]
             motion.move_task_pose(target, "retract_from_place", task,
                                   vel=fast_vel, acc=fast_acc)
 
@@ -215,12 +269,15 @@ class OpenBottleTask(BaseTask):
             # ("regrasp_descend",     _regrasp_descend),
             # ("regrasp_close",       motion.gripper.close),
             ("twist_open",          _twist_open),
+            ("descend_before_regrasp", _descend_before_regrasp),
+            ("release_after_open",  _release_after_open),
+            ("regrasp_cap_light",   _regrasp_cap_light),
             ("lift_cap",            _lift_cap),
-            ("approach_cap_place",  _approach_cap_place),
-            ("unrotate_cap",        _unrotate_cap),
+            ("restore_home_j6",     _restore_home_j6),
+            ("move_place_y",        _move_place_y),
             ("place_cap_down",      _place_cap_down),
+            ("release_cap",         _release_cap_on_floor),
             ("save_cap_place_pose", _save_cap_place_pose),
-            ("release_cap",         motion.gripper.open),
             ("retract_from_place",  _retract_from_place),
             ("home_finish",         _home_finish),
         ]

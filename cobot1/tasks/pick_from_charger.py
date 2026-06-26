@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from cobot1.motion.nudge_handoff import (
+    confirm_phone_grasped,
     grip_phone,
     wait_for_external_force,
 )
@@ -36,8 +37,14 @@ class PickFromChargerTask(BaseTask):
         carry_acc = float(cfg.get("carry_joint_acc", approach_acc))
         grasp_approach_vel = float(cfg.get("charger_grasp_approach_joint_vel", 5.0))
         grasp_approach_acc = float(cfg.get("charger_grasp_approach_joint_acc", 5.0))
-        return_vel = float(cfg.get("return_home_joint_vel", 8.0))
-        return_acc = float(cfg.get("return_home_joint_acc", 8.0))
+        grasp_tcp_z_advance_mm = float(cfg.get("charger_grasp_tcp_z_advance_mm", 5.0))
+        grasp_advance_vel = list(cfg.get("charger_grasp_advance_vel", [8, 5]))
+        grasp_advance_acc = list(cfg.get("charger_grasp_advance_acc", [16, 8]))
+        handoff_return_vel = float(cfg.get("handoff_return_joint_vel", 18.0))
+        handoff_return_acc = float(cfg.get("handoff_return_joint_acc", 18.0))
+        return_vel = float(cfg.get("return_home_joint_vel", 12.0))
+        return_acc = float(cfg.get("return_home_joint_acc", 12.0))
+        handoff_auto_release = float(cfg.get("handoff_auto_release_sec", 15.0))
 
         def _movej(
             joints: list[float],
@@ -47,6 +54,17 @@ class PickFromChargerTask(BaseTask):
             acc: float = approach_acc,
         ) -> None:
             motion.movej_joint(joints, label, task, vel=vel, acc=acc)
+
+        def _advance_grasp_tcp_z() -> None:
+            if grasp_tcp_z_advance_mm <= 0:
+                return
+            motion.move_relative_tool(
+                [0.0, 0.0, grasp_tcp_z_advance_mm, 0.0, 0.0, 0.0],
+                "move_charger_grasp_advance",
+                task,
+                vel=grasp_advance_vel,
+                acc=grasp_advance_acc,
+            )
 
         def _prepare_home() -> None:
             try:
@@ -80,6 +98,7 @@ class PickFromChargerTask(BaseTask):
                     acc=grasp_approach_acc,
                 ),
             ),
+            ("move_charger_grasp_advance", _advance_grasp_tcp_z),
             (
                 "grip_phone",
                 lambda: grip_phone(
@@ -89,6 +108,10 @@ class PickFromChargerTask(BaseTask):
                     grip_force,
                     grasp_settle,
                 ),
+            ),
+            (
+                "confirm_phone_grasp",
+                lambda: confirm_phone_grasped(motion, task, "confirm_phone_grasp"),
             ),
             (
                 "retract_prepose",
@@ -106,12 +129,37 @@ class PickFromChargerTask(BaseTask):
                     "wait_handoff_release",
                     cfg,
                     "핸드폰을 받아 주세요",
+                    auto_release_sec=handoff_auto_release,
                 ),
             ),
             ("release_phone", motion.gripper.open),
-            ("return_prepose", lambda: _movej(prepose_joint, "return_prepose")),
-            ("return_j4", lambda: _movej(approach_j4_joint, "return_j4")),
-            ("return_j5", lambda: _movej(approach_j5_joint, "return_j5")),
+            (
+                "return_prepose",
+                lambda: _movej(
+                    prepose_joint,
+                    "return_prepose",
+                    vel=handoff_return_vel,
+                    acc=handoff_return_acc,
+                ),
+            ),
+            (
+                "return_j4",
+                lambda: _movej(
+                    approach_j4_joint,
+                    "return_j4",
+                    vel=handoff_return_vel,
+                    acc=handoff_return_acc,
+                ),
+            ),
+            (
+                "return_j5",
+                lambda: _movej(
+                    approach_j5_joint,
+                    "return_j5",
+                    vel=handoff_return_vel,
+                    acc=handoff_return_acc,
+                ),
+            ),
             (
                 "home_finish",
                 lambda: motion.go_home(

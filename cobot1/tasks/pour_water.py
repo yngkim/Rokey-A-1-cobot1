@@ -4,15 +4,21 @@
   open_bottle 직후 — 로봇은 home, 그리퍼 열림, 물병은 컵홀더에 개봉된 채 꽂혀 있음.
 
 흐름:
-  몸통 파지   → 컵 옆 이동 → J6 빠름(0↔±30) → 느림(±30↔±80) 기울임 → 유지
-  → 약한 재파지 → J6 빠름(±80↔±50) → 느림(±50↔0) 세움 → 컵홀더 복귀 → home
+  몸통 TCP 접근 → 티칭 조인트 정렬(body_grasp_joint) → 파지
+  → 컵 옆 이동 → cup_side_joint 정렬
+  → J6 빠름(세운→중간) → 느림(중간→cup_pour_tilt_joint) 기울임 → 유지
+  → J6 빠름/느림 세움 → 컵홀더 복귀 → 그리퍼 열기 → 홈 → J6 복원
   (close_bottle 시작 전 상태)
+
+조인트 각도는 scenarios.yaml 티칭값을 movej로 그대로 맞춘다.
+TCP movel만 쓰면 J6 IK 분기로 -63° 티칭과 다른 각(±120° 등)이 선택될 수 있다.
 """
 
 from __future__ import annotations
 
 import math
 
+from cobot1.motion.pose_utils import offset_joint_tcp_translation
 from cobot1.tasks.base import BaseTask
 
 
@@ -22,12 +28,6 @@ def _normalize_joint_angle(deg: float) -> float:
     while deg < -180.0:
         deg += 360.0
     return deg
-
-
-def _joint_with_j6_delta(base: list[float], delta_deg: float) -> list[float]:
-    target = list(base)
-    target[5] = _normalize_joint_angle(target[5] + delta_deg)
-    return target
 
 
 class PourWaterTask(BaseTask):
@@ -43,18 +43,46 @@ class PourWaterTask(BaseTask):
 
         from cobot1.motion.dsr_imports import import_dsr_api
 
+        dsr = import_dsr_api()
         wp = self._scenarios["water_poses"]
         lift = float(wp.get("lift_clearance_mm", 120.0))
+        bottle_dz = float(wp.get("bottle_height_offset_mm", 0.0))
+        body_grasp_z_offset = float(cfg.get("body_grasp_z_offset_mm", 0.0))
+        body_grasp_y_offset = float(cfg.get("body_grasp_y_offset_mm", 0.0))
 
-        body_grasp_joint = list(cfg.get(
-            "body_grasp_joint",
-            [-41.99, 44.05, 101.32, 52.69, 112.6, -63.1],
-        ))
+        body_grasp_joint = offset_joint_tcp_translation(
+            cfg.get(
+                "body_grasp_joint",
+                [-41.99, 44.05, 101.32, 52.69, 112.6, -63.1],
+            ),
+            dy_mm=body_grasp_y_offset,
+            dz_mm=bottle_dz + body_grasp_z_offset,
+            fkin=dsr["fkin"],
+            ikin=dsr["ikin"],
+            get_solution_space=dsr["get_solution_space"],
+        )
         cup_side_joint = list(cfg.get(
             "cup_side_joint",
             [19.84, 35.26, 116.6, 106.22, 81.39, -63.12],
         ))
-        pour_tilt_delta = float(cfg.get("pour_tilt_delta_j6_deg", -80.0))
+        _default_pour_tilt_joint = list(cup_side_joint)
+        _default_pour_tilt_joint[5] = -180.12
+        cup_pour_tilt_joint = list(cfg.get(
+            "cup_pour_tilt_joint",
+            _default_pour_tilt_joint,
+        ))
+
+        align_jvel = float(cfg.get("pour_j6_pre_rotate_vel", 10.0))
+        align_jacc = float(cfg.get("pour_j6_pre_rotate_acc", 10.0))
+        pour_j6_restore_vel = float(cfg.get("pour_j6_restore_vel", 60.0))
+        pour_j6_restore_acc = float(cfg.get("pour_j6_restore_acc", 60.0))
+
+        pour_tilt_delta = float(
+            cfg.get(
+                "pour_tilt_delta_j6_deg",
+                cup_pour_tilt_joint[5] - cup_side_joint[5],
+            )
+        )
         pour_fast_zone = float(cfg.get("pour_fast_zone_deg", 30.0))
         pour_fast_jvel = float(cfg.get("pour_fast_joint_vel", 30.0))
         pour_fast_jacc = float(cfg.get("pour_fast_joint_acc", 30.0))
@@ -68,24 +96,24 @@ class PourWaterTask(BaseTask):
         pour_jvel = float(cfg.get("pour_joint_vel", 8.0))
         pour_jacc = float(cfg.get("pour_joint_acc", 8.0))
 
-        body_grip_force = float(cfg.get("body_grip_force", 100.0))
+        body_grip_force = float(cfg.get("body_grip_force", 110.0))
         body_grip_width = int(cfg.get("body_grip_width_units", 0))
-        body_grip_force_after = float(cfg.get("body_grip_force_after_pour", 80.0))
-        body_grip_relax_wait = float(cfg.get("body_grip_relax_wait_sec", 1.0))
         body_grasp_settle = float(cfg.get("body_grasp_settle_sec", 4.5))
         pour_duration = float(cfg.get("pour_duration_sec", 3.0))
         pre_pause = float(cfg.get("pre_pour_pause_sec", 0.5))
 
-        # J6 구간별 기울임 waypoint (pour_tilt_delta 부호에 맞춤)
+        # J6 기울임 — align 후 티칭 J6 절대 목표 (cup_side → cup_pour_tilt)
+        _upright_j6 = cup_side_joint[5]
+        _tilted_j6 = cup_pour_tilt_joint[5]
         _tilt_fast_delta = math.copysign(pour_fast_zone, pour_tilt_delta)
-        _tilt_mid_delta = pour_tilt_delta + math.copysign(pour_fast_zone, -pour_tilt_delta)
+        _fast_mid_j6 = _normalize_joint_angle(_upright_j6 + _tilt_fast_delta)
 
         def _fkin_tcp(joints: list[float]) -> list[float]:
-            return [float(v) for v in import_dsr_api()["fkin"](joints)]
+            return [float(v) for v in dsr["fkin"](joints)]
 
         def _release_compliance() -> None:
             try:
-                import_dsr_api()["release_compliance_ctrl"]()
+                dsr["release_compliance_ctrl"]()
             except Exception:
                 pass
 
@@ -99,7 +127,7 @@ class PourWaterTask(BaseTask):
             joints: list[float],
             label: str,
         ) -> None:
-            """빈 그리퍼로 목표 조인트에 TCP Z↑→XY→Z↓ 접근 (세워진 물병 충돌 방지)."""
+            """TCP Z↑→XY→Z↓ 접근 (충돌 방지). 최종 조인트는 align 단계에서 movej로 맞춤."""
             tcp = _fkin_tcp(joints)
             cur = motion.get_current_tcp_pose()
             travel_z = max(cur[2], tcp[2]) + lift
@@ -117,8 +145,18 @@ class PourWaterTask(BaseTask):
                 vel=grasp_vel, acc=grasp_acc,
             )
 
+        def _align_joint(joints: list[float], label: str) -> None:
+            """티칭 조인트 각도로 정렬 — movel 이후 J6 IK 분기 보정."""
+            motion.movej_joint(
+                joints, label, task,
+                vel=align_jvel, acc=align_jacc,
+            )
+
         def _move_to_body_grasp() -> None:
             _approach_joint(body_grasp_joint, "move_body_grasp")
+
+        def _align_body_grasp() -> None:
+            _align_joint(body_grasp_joint, "align_body_grasp")
 
         def _grasp_body() -> None:
             """물병 몸통 약파지 — 닫힘 명령 후 충분히 대기한 뒤 다음 단계로."""
@@ -144,37 +182,49 @@ class PourWaterTask(BaseTask):
             acc: list[float] | None = None,
             lower_vel: list[float] | None = None,
             lower_acc: list[float] | None = None,
-            keep_orientation: bool = False,
         ) -> None:
-            """목표 조인트의 TCP 기준 Z↑→XY→Z↓ 이송."""
+            """목표 조인트 TCP 기준 Z↑→XY→Z↓ 이송 (파지 후 자세 유지)."""
             tcp = _fkin_tcp(joints)
             motion.carry_to_pose(
                 tcp, label, task, lift,
-                vel=vel or fast_vel, acc=acc or fast_acc,
+                vel=vel or fast_vel, acc=fast_acc,
                 lower_vel=lower_vel or grasp_vel,
                 lower_acc=lower_acc or grasp_acc,
-                keep_orientation=keep_orientation,
+                keep_orientation=True,
             )
 
         def _carry_to_cup() -> None:
             _carry_to_joint(cup_side_joint, "carry_to_cup")
 
-        def _move_j6_delta(
-            delta_deg: float,
+        def _align_cup_joints() -> None:
+            _align_joint(cup_side_joint, "align_cup_joints")
+
+        def _move_j6_to(
+            target_j6: float,
             label: str,
             vel: float,
             acc: float,
         ) -> None:
-            target = _joint_with_j6_delta(cup_side_joint, delta_deg)
-            motion.movej_joint(target, label, task, vel=vel, acc=acc)
+            """align 직후 J1–J5는 cup_side 티칭값, J6만 절대 각도로 이동.
+
+            normalize 금지: -180.12 → 179.88 변환 시 DSR movej가
+            양수 방향(+243°)으로 돌아 기울임 반전됨. 원본 부호 유지.
+            """
+            base = list(cup_side_joint)
+            base[5] = float(target_j6)
+            motion.movej_joint(base, label, task, vel=vel, acc=acc)
 
         def _pour_tilt_fast() -> None:
-            """입구 누수 방지: 0 → ±fast_zone 빠르게."""
-            _move_j6_delta(_tilt_fast_delta, "pour_tilt_fast", pour_fast_jvel, pour_fast_jacc)
+            """입구 누수 방지: cup_side J6 → 중간 각도 빠르게."""
+            _move_j6_to(
+                _fast_mid_j6, "pour_tilt_fast", pour_fast_jvel, pour_fast_jacc,
+            )
 
         def _pour_tilt_slow() -> None:
-            """±fast_zone → 최대 기울임 천천히."""
-            _move_j6_delta(pour_tilt_delta, "pour_tilt_slow", pour_jvel, pour_jacc)
+            """중간 각도 → cup_pour_tilt_joint J6 천천히."""
+            _move_j6_to(
+                _tilted_j6, "pour_tilt_slow", pour_jvel, pour_jacc,
+            )
 
         def _hold_pour() -> None:
             motion.publish_status(task, "hold_pour", "running",
@@ -182,26 +232,17 @@ class PourWaterTask(BaseTask):
             motion.interruptible_sleep(pour_duration)
             motion.publish_status(task, "hold_pour", "done")
 
-        def _relax_grip_after_pour() -> None:
-            """빈 병 과조임 방지 — 벌리지 않고 힘만 ~8N(80)으로 낮춤."""
-            motion.publish_status(
-                task, "relax_grip", "running",
-                f"힘만 낮춤 (force={body_grip_force_after:.0f}, width=0)",
-            )
-            motion.gripper.grip(
-                force=body_grip_force_after,
-                width_units=0,
-                wait_sec=body_grip_relax_wait,
-            )
-            motion.publish_status(task, "relax_grip", "done")
-
         def _untilt_fast() -> None:
-            """±80 → ±60 빠르게 (입구 통과)."""
-            _move_j6_delta(_tilt_mid_delta, "untilt_fast", pour_fast_jvel, pour_fast_jacc)
+            """최대 기울임 → 중간 각도 빠르게 (입구 통과)."""
+            _move_j6_to(
+                _fast_mid_j6, "untilt_fast", pour_fast_jvel, pour_fast_jacc,
+            )
 
         def _untilt_slow() -> None:
-            """±60 → 0 천천히."""
-            _move_j6_delta(0.0, "untilt_slow", pour_jvel, pour_jacc)
+            """중간 각도 → cup_side_joint J6 천천히."""
+            _move_j6_to(
+                _upright_j6, "untilt_slow", pour_jvel, pour_jacc,
+            )
 
         def _carry_back() -> None:
             """컵홀더 복귀: body_grasp XY 정렬 후 Z만 수직 하강."""
@@ -224,8 +265,8 @@ class PourWaterTask(BaseTask):
                 vel=grasp_vel, acc=grasp_acc,
             )
 
-        def _retract_and_home() -> None:
-            """세워진 물병 회피: Z↑ → home XY 상공 → home 조인트."""
+        def _retract_to_home() -> None:
+            """Z↑ → home XY 상공 → home 조인트 (J6는 유지)."""
             cur = motion.get_current_tcp_pose()
             home_tcp = _fkin_tcp(home_joint)
             travel_z = max(cur[2], home_tcp[2]) + lift
@@ -235,27 +276,47 @@ class PourWaterTask(BaseTask):
             )
             motion.move_task_pose(
                 [home_tcp[0], home_tcp[1], travel_z,
-                 home_tcp[3], home_tcp[4], home_tcp[5]],
+                 cur[3], cur[4], cur[5]],
                 "home_travel", task,
                 vel=fast_vel, acc=fast_acc,
             )
-            motion.movej_joint(home_joint, "home_finish", task,
+            joints = motion.get_current_joint()
+            target = list(home_joint)
+            target[5] = joints[5]
+            motion.movej_joint(target, "home_finish", task,
                              vel=fast_jvel, acc=fast_jacc)
 
+        def _restore_j6_at_home() -> None:
+            """홈 위치에서 J6만 복원."""
+            joints = motion.get_current_joint()
+            target = list(joints)
+            target[5] = _normalize_joint_angle(home_joint[5])
+            motion.publish_status(
+                task, "restore_j6_at_home", "running",
+                f"J6 복원 (목표={home_joint[5]:.1f}°)",
+            )
+            motion.movej_joint(
+                target, "restore_j6_at_home", task,
+                vel=pour_j6_restore_vel, acc=pour_j6_restore_acc,
+            )
+            motion.publish_status(task, "restore_j6_at_home", "done")
+
         steps = [
-            ("prepare_start",    _prepare_start),
-            ("move_body_grasp",  _move_to_body_grasp),
-            ("grasp_body",       _grasp_body),
-            ("carry_to_cup",     _carry_to_cup),
-            ("pre_pour_pause",   lambda: motion.interruptible_sleep(pre_pause)),
-            ("pour_tilt_fast",   _pour_tilt_fast),
-            ("pour_tilt_slow",   _pour_tilt_slow),
-            ("hold_pour",        _hold_pour),
-            ("relax_grip",       _relax_grip_after_pour),
-            ("untilt_fast",      _untilt_fast),
-            ("untilt_slow",      _untilt_slow),
-            ("carry_back",       _carry_back),
-            ("release_body",     motion.gripper.open),
-            ("retract_and_home", _retract_and_home),
+            ("prepare_start",           _prepare_start),
+            ("move_body_grasp",         _move_to_body_grasp),
+            ("align_body_grasp",        _align_body_grasp),
+            ("grasp_body",              _grasp_body),
+            ("carry_to_cup",            _carry_to_cup),
+            ("align_cup_joints",        _align_cup_joints),
+            ("pre_pour_pause",          lambda: motion.interruptible_sleep(pre_pause)),
+            ("pour_tilt_fast",          _pour_tilt_fast),
+            ("pour_tilt_slow",          _pour_tilt_slow),
+            ("hold_pour",               _hold_pour),
+            ("untilt_fast",             _untilt_fast),
+            ("untilt_slow",             _untilt_slow),
+            ("carry_back",              _carry_back),
+            ("release_body",            motion.gripper.open),
+            ("retract_to_home",         _retract_to_home),
+            ("restore_j6_at_home",      _restore_j6_at_home),
         ]
         motion.run_sequence(task, steps)

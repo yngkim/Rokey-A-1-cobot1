@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import copy
 import threading
 
+from cobot1.bridge.handoff_gate import ensure_handoff_gate
 from cobot1.config_loader import load_scenarios
 from cobot1.motion.primitives import MotionContext, RobotMotion
 from cobot1.robot_init import destroy_dsr_node, prepare_autonomous_mode, setup
@@ -39,8 +41,9 @@ class WebTaskSession:
         )
         return self._motion
 
-    def run(self, task_id: str) -> bool:
+    def run(self, task_id: str, care_user_id: str | None = None) -> bool:
         _ensure_registry()
+        ensure_handoff_gate()
         if task_id not in TASK_REGISTRY:
             raise ValueError(f"알 수 없는 태스크: {task_id}")
 
@@ -49,6 +52,14 @@ class WebTaskSession:
             motion = self._ensure_motion()
             prepare_autonomous_mode()
             scenarios = load_scenarios()
+            if care_user_id:
+                scenarios = copy.deepcopy(scenarios)
+                for key in ("serve_meal", "return_tray", "measure_tray_weight"):
+                    if key in scenarios:
+                        scenarios[key] = {
+                            **scenarios[key],
+                            "care_user_id": care_user_id,
+                        }
             task = TASK_REGISTRY[task_id](scenarios, motion)
             result = task.run()
             # recover_pose 는 run_sequence → safe_abort 내부에서 이미 수행된다.

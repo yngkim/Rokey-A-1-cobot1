@@ -3,10 +3,14 @@ import { Link } from 'react-router-dom'
 import {
   fetchActiveCareUser,
   fetchCareUsers,
+  fetchVoiceCatalog,
   forceIdle,
+  getTaskVoiceHint,
   recordCareEvent,
   runTask,
+  sendHandoffConfirm,
   setActiveCareUser,
+  taskVoiceHintsFromCatalog,
 } from './api/client'
 import SafetyAlertModal from './components/SafetyAlertModal'
 import RunningDock from './components/RunningDock'
@@ -15,7 +19,7 @@ import { useRobotApp } from './hooks/useRobotApp'
 import { useRobotSpeech } from './hooks/useRobotSpeech'
 import { useVoiceInput } from './hooks/useVoiceInput'
 
-function TaskButton({ task, disabled, hint, onRun }) {
+function TaskButton({ task, disabled, hint, voicePhrase, onRun }) {
   const [loading, setLoading] = useState(false)
 
   const handleClick = async () => {
@@ -37,6 +41,9 @@ function TaskButton({ task, disabled, hint, onRun }) {
     >
       <span className="task-icon">{task.icon}</span>
       <span className="task-label">{task.label}</span>
+      {voicePhrase && (
+        <span className="task-voice-hint">「{voicePhrase}」</span>
+      )}
       {loading && <span className="task-spinner" />}
     </button>
   )
@@ -48,6 +55,16 @@ function phoneTaskHint(taskId, phoneLocation) {
   }
   if (taskId === 'place_on_charger' && phoneLocation === 'on_charger') {
     return '핸드폰은 이미 거치대에 있어요'
+  }
+  return ''
+}
+
+function trayTaskHint(taskId, trayLocation) {
+  if (
+    (taskId === 'serve_meal' || taskId === 'return_tray') &&
+    trayLocation !== 'on_station'
+  ) {
+    return '트레이가 원위치에 없습니다'
   }
   return ''
 }
@@ -66,6 +83,7 @@ export default function CareApp() {
   const [careUsers, setCareUsers] = useState([])
   const [activeUserId, setActiveUserId] = useState('')
   const [activeUserName, setActiveUserName] = useState('')
+  const [taskVoiceHints, setTaskVoiceHints] = useState({})
 
   const {
     tasks,
@@ -74,6 +92,9 @@ export default function CareApp() {
     busy,
     maintenance,
     phoneLocation,
+    trayLocation,
+    handoffAction,
+    handoffPrompt,
     stopping,
     resetting,
     activeTaskLabel,
@@ -102,6 +123,12 @@ export default function CareApp() {
       })
       .catch(() => {})
   }, [apiOnline])
+
+  useEffect(() => {
+    fetchVoiceCatalog()
+      .then((data) => setTaskVoiceHints(taskVoiceHintsFromCatalog(data)))
+      .catch(() => {})
+  }, [])
 
   const handleUserChange = async (userId) => {
     try {
@@ -230,6 +257,15 @@ export default function CareApp() {
     }
   }
 
+  const handleHandoffConfirm = async (action) => {
+    try {
+      await sendHandoffConfirm(action)
+      showToast('트레이 가져가기 확인', 'info')
+    } catch (err) {
+      showToast(err.message, 'error')
+    }
+  }
+
   const handleForceIdle = async () => {
     try {
       await forceIdle()
@@ -313,12 +349,15 @@ export default function CareApp() {
                 .filter((t) => t.group === group)
                 .map((task) => {
                   const phoneHint = phoneTaskHint(task.id, phoneLocation)
+                  const trayHint = trayTaskHint(task.id, trayLocation)
+                  const taskHint = phoneHint || trayHint
                   return (
                   <TaskButton
                     key={task.id}
                     task={task}
-                    disabled={!canRun || !!phoneHint}
-                    hint={phoneHint || disabledHint}
+                    disabled={!canRun || !!taskHint}
+                    hint={taskHint || disabledHint}
+                    voicePhrase={getTaskVoiceHint(task.id, taskVoiceHints)}
                     onRun={handleRun}
                   />
                   )
@@ -328,7 +367,7 @@ export default function CareApp() {
         ))}
 
         <section className="task-section">
-          <h2>복약 · 식사 기록</h2>
+          <h2>복약 기록</h2>
           <div className="task-grid">
             <button
               type="button"
@@ -339,16 +378,6 @@ export default function CareApp() {
             >
               <span className="task-icon">✅</span>
               <span className="task-label">복용 완료</span>
-            </button>
-            <button
-              type="button"
-              className="task-btn"
-              disabled={!activeUserId}
-              onClick={() => handleCareLog('meal', '식사')}
-              title="식사 1회 기록 (추후 식사량 자동 연동 예정)"
-            >
-              <span className="task-icon">🍽️</span>
-              <span className="task-label">식사 기록</span>
             </button>
           </div>
         </section>
@@ -391,7 +420,9 @@ export default function CareApp() {
         busy={busy}
         taskLabel={activeTaskLabel}
         step={status?.step}
-        stepMessage={status?.message}
+        stepMessage={status?.message || handoffPrompt}
+        handoffAction={handoffAction}
+        onHandoffConfirm={handleHandoffConfirm}
         onStop={handleStop}
         stopping={stopping}
       />

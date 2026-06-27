@@ -39,7 +39,8 @@ const STEP_LABELS = {
   approach_bedside: '침상 접근',
   move_charger: '충전기 위치 이동',
   move_handoff: '인수인계 위치 이동',
-  move_route_mid: '중간 경유 이동',
+  move_route_mid: '중간 경유 (조인트)',
+  post_grasp_lift: '파지 후 Z 상승',
   move_route_mid_return: '중간 경유 복귀',
   move_route_mid_lift: 'Z 상승 (중간 경유)',
   move_route_mid_travel: '중간 경유 수평 이동',
@@ -55,10 +56,24 @@ const STEP_LABELS = {
   move_charger_travel: '수평 이동',
   move_charger_descend: 'Z 하강',
   move_handoff_lift: 'Z 상승 (장애물 회피)',
-  move_handoff_travel: '수평 이동',
-  move_handoff_descend: 'Z 하강',
+  move_handoff_travel: '인계 수평 이동',
+  move_handoff_descend: '인계 Z 하강',
   wait_handoff_release: '핸드폰 전달 대기',
   wait_handoff_grasp: '핸드폰 올려놓기 대기',
+  wait_user_gripper_open: '그리퍼 열기 대기',
+  wait_user_gripper_close: '그리퍼 닫기 대기',
+  wait_user_confirm_tray_return: '트레이 가져가기 대기',
+  move_tray_grasp: '트레이 위치 이동',
+  move_tray_grasp_elevated: '원위치 상공 이동',
+  move_tray_grasp_descend: '원위치 Z 하강',
+  grasp_tray: '트레이 파지',
+  tray_weigh_before: '식전 무게 측정',
+  tray_weigh_after: '식후 무게 측정',
+  carry_to_user: '사용자에게 이송',
+  carry_to_station: '원위치로 이송',
+  handoff_tray_return: '트레이 인계',
+  release_tray: '트레이 놓기',
+  meal_intake: '식사량 계산',
   approach_place: '놓는 위치 이동',
   approach_pick: '집기 위치 이동',
   grasp_bottle: '병 잡기',
@@ -110,8 +125,20 @@ export function stepLabel(step) {
   return STEP_LABELS[step] || step.replace(/_/g, ' ')
 }
 
-export default function RunningDock({ busy, taskLabel, step, stepMessage, onStop, stopping }) {
+export default function RunningDock({
+  busy,
+  taskLabel,
+  step,
+  stepMessage,
+  handoffAction,
+  onHandoffConfirm,
+  onStop,
+  stopping,
+}) {
   if (!busy) return null
+
+  const handoffLabel =
+    handoffAction === 'tray_return' ? '트레이 가져가기' : null
 
   return (
     <>
@@ -127,14 +154,25 @@ export default function RunningDock({ busy, taskLabel, step, stepMessage, onStop
               <span className="running-dock-msg">{stepMessage}</span>
             )}
           </div>
-          <button
-            type="button"
-            className="running-dock-stop"
-            onClick={onStop}
-            disabled={stopping}
-          >
-            {stopping ? '정지 중…' : '■ 정지'}
-          </button>
+          <div className="running-dock-actions">
+            {handoffLabel && onHandoffConfirm && (
+              <button
+                type="button"
+                className="running-dock-handoff"
+                onClick={() => onHandoffConfirm(handoffAction)}
+              >
+                {handoffLabel}
+              </button>
+            )}
+            <button
+              type="button"
+              className="running-dock-stop"
+              onClick={onStop}
+              disabled={stopping}
+            >
+              {stopping ? '정지 중…' : '■ 정지'}
+            </button>
+          </div>
         </div>
       </div>
     </>

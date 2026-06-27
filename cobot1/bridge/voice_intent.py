@@ -31,6 +31,8 @@ def normalize(text: str) -> str:
     text = re.sub(r"가져가\s*주세요", "가져가줘", text)
     text = re.sub(r"준비해\s*줘", "준비해 줘", text)
     text = re.sub(r"준비해줘", "준비해 줘", text)
+    text = re.sub(r"청소해\s*줘", "청소해줘", text)
+    text = re.sub(r"청소해\s*주세요", "청소해줘", text)
     return text.strip()
 
 
@@ -108,6 +110,7 @@ def get_voice_catalog(config: dict[str, Any] | None = None) -> dict[str, Any]:
                 "phrase": primary or (phrases[0] if phrases else ""),
                 "phrases": phrases,
                 "action": item["action"],
+                "task_id": str(item.get("task_id", "")),
             }
         )
     return {

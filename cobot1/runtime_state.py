@@ -12,6 +12,7 @@ _CAP_PLACE_POSE_FILE = "cap_place_pose.json"
 _DRAWER_PULLED_JOINT_FILE = "drawer_pulled_joint.json"
 _PHONE_LOCATION_FILE = "phone_location.json"
 _TRAY_WEIGHT_SESSION_FILE = "tray_weight_session.json"
+_TRAY_TARE_FILE = "tray_tare.json"
 _TRAY_LOCATION_FILE = "tray_location.json"
 
 PHONE_ON_CHARGER = "on_charger"
@@ -119,6 +120,14 @@ def can_place_on_charger() -> bool:
     return get_phone_location() == PHONE_WITH_USER
 
 
+def can_serve_tray() -> bool:
+    return get_tray_location() == TRAY_ON_STATION
+
+
+def can_return_tray() -> bool:
+    return get_tray_location() == TRAY_ON_STATION
+
+
 def _read_json_file(path: Path) -> dict | None:
     if not path.is_file():
         return None
@@ -180,6 +189,65 @@ def save_tray_weight_phase(
     return data
 
 
+def save_tray_tare(fz_n: float, *, source: str = "calibrate_tray_tare") -> dict:
+    """빈 트레이+식판 공차 Fz 영구 저장."""
+    data = {
+        "tare_fz": float(fz_n),
+        "source": source,
+        "updated_at": time.time(),
+    }
+    path = runtime_state_dir() / _TRAY_TARE_FILE
+    _write_json_file(path, data)
+    return data
+
+
+def get_tray_tare() -> float | None:
+    """저장된 공차 Fz. 없으면 None."""
+    path = runtime_state_dir() / _TRAY_TARE_FILE
+    data = _read_json_file(path)
+    if not data:
+        return None
+    raw = data.get("tare_fz")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def clear_tray_tare() -> None:
+    path = runtime_state_dir() / _TRAY_TARE_FILE
+    if path.is_file():
+        path.unlink()
+
+
+def net_food_load(fz_n: float, tare_fz: float) -> float:
+    """Fz에서 공차를 뺀 순(음식) 부하."""
+    return max(0.0, abs(float(fz_n)) - abs(float(tare_fz)))
+
+
+def compute_net_intake_pct(
+    before_fz: float,
+    after_fz: float,
+    *,
+    tare_fz: float | None = None,
+    min_load_n: float = 2.0,
+) -> float | None:
+    """공차 보정 후 순 음식 무게 기준 섭취율(%)."""
+    if tare_fz is None:
+        tare_fz = get_tray_tare()
+    if tare_fz is None:
+        return None
+
+    net_before = net_food_load(before_fz, tare_fz)
+    net_after = net_food_load(after_fz, tare_fz)
+    if net_before < float(min_load_n):
+        return None
+    pct = (net_before - net_after) / net_before * 100.0
+    return max(0.0, min(100.0, pct))
+
+
 def compute_tray_intake_from_session(
     *,
     before_fz: float | None = None,
@@ -206,12 +274,11 @@ def compute_tray_intake_from_session(
     if before_fz is None or after_fz is None:
         return None
 
-    before_abs = abs(float(before_fz))
-    if before_abs < float(min_load_n):
-        return None
-    after_abs = abs(float(after_fz))
-    pct = (before_abs - after_abs) / before_abs * 100.0
-    return max(0.0, min(100.0, pct))
+    return compute_net_intake_pct(
+        float(before_fz),
+        float(after_fz),
+        min_load_n=min_load_n,
+    )
 
 
 def get_tray_location() -> str:

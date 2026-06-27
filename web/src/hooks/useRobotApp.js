@@ -41,6 +41,9 @@ function shouldClearBusy(data, voiceChainActive) {
 
 const VOICE_TASK_LABELS = {
   prepare_medication: '약 준비하기',
+  clean_floor: '청소하기',
+  serve_meal: '식사 가져오기',
+  return_tray: '식사 가져가기',
 }
 
 export function useRobotApp(speechRef) {
@@ -57,6 +60,9 @@ export function useRobotApp(speechRef) {
   const [alert, setAlert] = useState(null)
   const [toast, setToast] = useState(null)
   const [phoneLocation, setPhoneLocation] = useState('on_charger')
+  const [trayLocation, setTrayLocation] = useState('on_station')
+  const [handoffAction, setHandoffAction] = useState(null)
+  const [handoffPrompt, setHandoffPrompt] = useState('')
   const wsRef = useRef(null)
   const voiceChainRef = useRef(false)
   const stopTimeoutRef = useRef(null)
@@ -75,6 +81,8 @@ export function useRobotApp(speechRef) {
     setResetting(false)
     setActiveTaskId('')
     voiceChainRef.current = false
+    setHandoffAction(null)
+    setHandoffPrompt('')
   }, [clearStopTimeout])
 
   const showSafetyAlert = useCallback((data) => {
@@ -101,6 +109,9 @@ export function useRobotApp(speechRef) {
     setMaintenance(!!data.maintenance)
     setActiveTaskId(data.current_task || '')
     if (data.phone_location) setPhoneLocation(data.phone_location)
+    if (data.tray_location) setTrayLocation(data.tray_location)
+    setHandoffAction(data.handoff_action || null)
+    setHandoffPrompt(data.handoff_prompt || '')
     if (data.last_status) setStatus(data.last_status)
     if (!data.busy) {
       setStopping(false)
@@ -127,6 +138,9 @@ export function useRobotApp(speechRef) {
         setActiveTaskId(h.current_task || '')
         updateTaskLabel(h.current_task || '', h.current_task_label || '')
         if (h.phone_location) setPhoneLocation(h.phone_location)
+        if (h.tray_location) setTrayLocation(h.tray_location)
+        setHandoffAction(h.handoff_action || null)
+        setHandoffPrompt(h.handoff_prompt || '')
         if (!h.busy) {
           setStopping(false)
           voiceChainRef.current = false
@@ -285,6 +299,9 @@ export function useRobotApp(speechRef) {
     busy,
     maintenance,
     phoneLocation,
+    trayLocation,
+    handoffAction,
+    handoffPrompt,
     stopping,
     activeTaskId,
     activeTaskLabel,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Type
 
+from cobot1.bridge.handoff_gate import ensure_handoff_gate
 from cobot1.config_loader import load_scenarios
 from cobot1.motion.primitives import MotionContext, RobotMotion
 from cobot1.robot_init import destroy_dsr_node, prepare_autonomous_mode, setup
@@ -21,6 +22,10 @@ def register_task(task_cls: Type[BaseTask]) -> Type[BaseTask]:
 def _ensure_registry() -> None:
     if TASK_REGISTRY:
         return
+    from cobot1.tasks.calibrate_tray_tare import CalibrateTrayTareTask
+    from cobot1.tasks.return_tray import ReturnTrayTask
+    from cobot1.tasks.serve_meal import ServeMealTask
+    from cobot1.tasks.clean_floor import CleanFloorTask
     from cobot1.tasks.close_bottle import CloseBottleTask
     from cobot1.tasks.go_home import GoHomeTask
     from cobot1.tasks.open_bottle import OpenBottleTask
@@ -39,6 +44,10 @@ def _ensure_registry() -> None:
         PlaceOnChargerTask,
         PickFromChargerTask,
         MeasureTrayWeightTask,
+        CalibrateTrayTareTask,
+        CleanFloorTask,
+        ServeMealTask,
+        ReturnTrayTask,
     ):
         register_task(task_cls)
 
@@ -54,6 +63,7 @@ def run_task(
     if task_name not in TASK_REGISTRY:
         raise ValueError(f"알 수 없는 태스크: {task_name}")
 
+    ensure_handoff_gate()
     scenarios = load_scenarios(config_path, overrides)
     node = setup(node_name or f"cobot1_{task_name}", args=args)
     motion = None

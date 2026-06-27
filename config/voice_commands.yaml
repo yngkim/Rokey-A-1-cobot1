@@ -26,9 +26,30 @@ commands:
       - "핸드폰 가져가주세요"
     action: run_task
     task_id: place_on_charger
+  - id: serve_meal
+    phrases:
+      - "식사 가져와줘"
+      - "식사 가져와 줘"
+      - "식사 가져다줘"
+      - "식사 가져다 줘"
+    action: run_task
+    task_id: serve_meal
+  - id: return_tray
+    phrases:
+      - "식사 가져가줘"
+      - "식사 가져가 줘"
+    action: run_task
+    task_id: return_tray
   - id: stop
     phrase: "멈춰"
     action: stop
+  - id: clean_floor
+    phrases:
+      - "청소해줘"
+      - "청소해 줘"
+      - "청소해주세요"
+    action: run_task
+    task_id: clean_floor
 
 speech:
   prepare_medication:
@@ -40,16 +61,29 @@ speech:
   place_phone:
     ack: "네, 핸드폰 거치대에 갖다 놓을게요."
     complete: "핸드폰을 거치대에 놓았어요."
+  serve_meal:
+    ack: "네, 식사 가져다 드릴게요."
+    complete: "식사 가져다 드렸어요."
+  return_tray:
+    ack: "네, 식사 가져갈게요."
+    complete: "식사 가져갔어요."
   stop:
     ack: "네, 멈추겠습니다."
+  clean_floor:
+    ack: "네, 청소해 드릴게요."
+    complete: "청소가 끝났어요."
   global:
     not_understood: "잘 못 들었어요. 다시 말씀해 주세요."
     busy: "지금 다른 일을 하고 있어요. 잠시만 기다려 주세요."
     error: "작업 중 문제가 생겼어요."
     phone_with_user: "핸드폰은 이미 가져가셨어요."
     phone_on_charger: "핸드폰은 이미 거치대에 있어요."
+    tray_not_on_station: "트레이가 원위치에 없어요."
 
 labels:
   prepare_medication: "약 준비하기"
   pick_phone: "핸드폰 가져오기"
   place_phone: "핸드폰 가져다놓기"
+  serve_meal: "식사 가져오기"
+  return_tray: "식사 가져가기"
+  clean_floor: "청소하기"

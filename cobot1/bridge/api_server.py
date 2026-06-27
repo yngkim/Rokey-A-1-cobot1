@@ -22,6 +22,7 @@ from cobot1.bridge.care_store import (
     get_care_store,
 )
 from cobot1.bridge.event_store import get_event_store
+from cobot1.bridge.handoff_gate import UserHandoffGate, set_handoff_gate
 from cobot1.bridge.task_session import WebTaskSession
 from cobot1.motion.safety import UNSAFE_ROBOT_STATES
 from cobot1.bridge.voice_config import load_voice_config
@@ -36,10 +37,16 @@ from cobot1.robot_config import ROBOT_ID
 from cobot1.runtime_state import (
     PHONE_ON_CHARGER,
     PHONE_WITH_USER,
+    TRAY_ON_STATION,
+    TRAY_WITH_USER,
     can_pick_from_charger,
     can_place_on_charger,
+    can_return_tray,
+    can_serve_tray,
     get_phone_location,
+    get_tray_location,
     set_phone_location,
+    set_tray_location,
 )
 from cobot1.task_runner import TASK_REGISTRY, _ensure_registry
 
@@ -47,7 +54,9 @@ TASK_CATALOG: list[dict[str, str]] = [
     {"id": "prepare_medication", "label": "약 준비하기", "icon": "💊", "group": "복약"},
     {"id": "place_on_charger", "label": "핸드폰 가져다놓기", "icon": "📲", "group": "스마트폰"},
     {"id": "pick_from_charger", "label": "핸드폰 가져오기", "icon": "🔋", "group": "스마트폰"},
-    {"id": "measure_tray_weight", "label": "식판 무게 측정", "icon": "🍽️", "group": "식사"},
+    {"id": "serve_meal", "label": "식사 가져오기", "icon": "🍱", "group": "식사"},
+    {"id": "return_tray", "label": "식사 가져가기", "icon": "↩️", "group": "식사"},
+    {"id": "clean_floor", "label": "청소하기", "icon": "🧹", "group": "케어"},
     {"id": "go_home", "label": "기본 위치 복귀", "icon": "🏠", "group": "제어"},
 ]
 
@@ -91,6 +100,8 @@ class RosBridge(Node):
         self._current_run_id: str | None = None
         self._robot_state = -1
         self._robot_state_label = "UNKNOWN"
+        self._handoff_gate = UserHandoffGate(on_change=self._broadcast_sync)
+        set_handoff_gate(self._handoff_gate)
 
         self.create_subscription(String, "cobot1/status", self._on_status, 10)
         self.create_subscription(String, "cobot1/safety_alert", self._on_alert, 10)
@@ -293,6 +304,7 @@ class RosBridge(Node):
             self._current_task_id = ""
             self._voice_command_id = ""
             self._current_run_id = None
+        self._handoff_gate.clear()
         self._broadcast(
             {
                 "type": "task_complete",
@@ -310,7 +322,9 @@ class RosBridge(Node):
                 "last_status": self._last_status,
                 "maintenance": self._maintenance_mode,
                 "phone_location": get_phone_location(),
+                "tray_location": get_tray_location(),
             }
+            sync.update(self._handoff_gate.snapshot())
         self._broadcast({"type": "sync", "data": sync})
 
     def _is_terminal_status(self, payload: dict[str, Any]) -> bool:
@@ -420,7 +434,9 @@ class RosBridge(Node):
                 "last_status": self._last_status,
                 "maintenance": self._maintenance_mode,
                 "phone_location": get_phone_location(),
+                "tray_location": get_tray_location(),
             }
+            sync.update(self._handoff_gate.snapshot())
         asyncio.run_coroutine_threadsafe(
             ws.send_text(
                 json.dumps({"type": "sync", "data": sync}, ensure_ascii=False)
@@ -523,8 +539,9 @@ class RosBridge(Node):
             "code": "STARTED",
         }
 
-    def _execute_task(self, task_id: str) -> bool:
-        return self._task_session.run(task_id)
+    def _execute_task(self, task_id: str, user_id: str | None = None) -> bool:
+        uid = user_id or self._active_care_user_id
+        return self._task_session.run(task_id, care_user_id=uid)
 
     def shutdown_session(self) -> None:
         self._task_session.cleanup()
@@ -609,6 +626,19 @@ class RosBridge(Node):
             }
         return None
 
+    def _tray_task_rejection(self, task_id: str) -> dict[str, str] | None:
+        if task_id == "serve_meal" and not can_serve_tray():
+            return {
+                "message": "트레이가 원위치에 없습니다.",
+                "code": "TRAY_NOT_ON_STATION",
+            }
+        if task_id == "return_tray" and not can_return_tray():
+            return {
+                "message": "트레이가 원위치에 없습니다.",
+                "code": "TRAY_NOT_ON_STATION",
+            }
+        return None
+
     def _apply_phone_task_result(self, task_id: str) -> None:
         if task_id == "pick_from_charger":
             set_phone_location(PHONE_WITH_USER)
@@ -617,6 +647,43 @@ class RosBridge(Node):
         else:
             return
         self._broadcast_sync()
+
+    def _apply_tray_task_result(self, task_id: str) -> None:
+        if task_id in ("serve_meal", "return_tray"):
+            set_tray_location(TRAY_ON_STATION)
+        else:
+            return
+        self._broadcast_sync()
+
+    def confirm_handoff(self, action: str) -> dict[str, Any]:
+        action = action.strip().lower()
+        if action not in ("tray_return",):
+            return {
+                "success": False,
+                "message": "action은 tray_return 이어야 합니다.",
+                "code": "INVALID_ACTION",
+            }
+        with self._task_lock:
+            if not self._busy:
+                return {
+                    "success": False,
+                    "message": "실행 중인 작업이 없습니다.",
+                    "code": "NOT_BUSY",
+                }
+        ok, message = self._handoff_gate.try_confirm(action)
+        if not ok:
+            return {
+                "success": False,
+                "message": message,
+                "code": "NOT_WAITING",
+            }
+        self._broadcast_sync()
+        return {
+            "success": True,
+            "message": message,
+            "code": "CONFIRMED",
+            "action": action,
+        }
 
     def handle_voice_command(self, text: str) -> dict[str, Any]:
         command = resolve_voice_command(text)
@@ -733,6 +800,18 @@ class RosBridge(Node):
                 "code": "NOT_FOUND",
             }
 
+        tray_block = self._tray_task_rejection(task_id)
+        if tray_block:
+            return {
+                "matched": True,
+                "command_id": command.id,
+                "action": "rejected",
+                "speech": self._speech_payload("global", "tray_not_on_station"),
+                "success": False,
+                "message": tray_block["message"],
+                "code": tray_block["code"],
+            }
+
         with self._task_lock:
             self._busy = True
             self._chain_active = False
@@ -757,6 +836,7 @@ class RosBridge(Node):
             finally:
                 if success:
                     self._apply_phone_task_result(task_id)
+                    self._apply_tray_task_result(task_id)
                 self._end_run(
                     run_id,
                     success=success,
@@ -890,7 +970,7 @@ class RosBridge(Node):
                         task_id, trigger, voice_command_id=command.id
                     )
                     last_run_id = run_id
-                    task_ok = self._execute_task(task_id)
+                    task_ok = self._execute_task(task_id, user_id=care_user_id)
                     self._end_run(
                         run_id,
                         success=task_ok,
@@ -901,6 +981,7 @@ class RosBridge(Node):
                         failed_task = task_id
                         break
                     self._apply_phone_task_result(task_id)
+                    self._apply_tray_task_result(task_id)
             except Exception as exc:
                 success = False
                 self.get_logger().error(f"음성 체인 {command.id} 실패: {exc}")
@@ -966,6 +1047,14 @@ class RosBridge(Node):
                 "success": False,
                 "message": phone_block["message"],
                 "code": phone_block["code"],
+            }
+
+        tray_block = self._tray_task_rejection(task_id)
+        if tray_block:
+            return {
+                "success": False,
+                "message": tray_block["message"],
+                "code": tray_block["code"],
             }
 
         if task_id == "prepare_medication":
@@ -1041,12 +1130,13 @@ class RosBridge(Node):
         def _worker():
             success = False
             try:
-                success = self._execute_task(task_id)
+                success = self._execute_task(task_id, user_id=user_id)
             except Exception as exc:
                 self.get_logger().error(f"태스크 {task_id} 실패: {exc}")
             finally:
                 if success:
                     self._apply_phone_task_result(task_id)
+                    self._apply_tray_task_result(task_id)
                 self._end_run(
                     run_id,
                     success=success,
@@ -1223,6 +1313,10 @@ class TaskRunRequest(BaseModel):
     user_id: str | None = None
 
 
+class HandoffConfirmRequest(BaseModel):
+    action: str
+
+
 class ActiveCareUserRequest(BaseModel):
     user_id: str
 
@@ -1314,6 +1408,11 @@ def create_app():
             "phone_location": get_phone_location(),
             "phone_pick_available": can_pick_from_charger(),
             "phone_place_available": can_place_on_charger(),
+            "tray_location": get_tray_location(),
+            "tray_serve_available": can_serve_tray(),
+            "tray_return_available": can_return_tray(),
+            "handoff_action": bridge._handoff_gate.snapshot().get("handoff_action"),
+            "handoff_prompt": bridge._handoff_gate.snapshot().get("handoff_prompt"),
         }
 
     @app.get("/api/tasks")
@@ -1345,6 +1444,18 @@ def create_app():
             raise HTTPException(status_code=404, detail=result["message"])
         if result.get("code") == "MAINTENANCE":
             raise HTTPException(status_code=503, detail=result["message"])
+        return result
+
+    @app.post("/api/handoff/confirm")
+    def handoff_confirm(body: HandoffConfirmRequest):
+        bridge = bridge_holder.get("bridge")
+        if bridge is None:
+            raise HTTPException(status_code=503, detail="ROS bridge 초기화 중")
+        result = bridge.confirm_handoff(body.action)
+        if not result.get("success"):
+            code = result.get("code", "ERROR")
+            status = 409 if code == "NOT_WAITING" else 400
+            raise HTTPException(status_code=status, detail=result.get("message"))
         return result
 
     @app.get("/api/care/users")

@@ -13,6 +13,23 @@ function todayStr() {
   return new Date().toISOString().slice(0, 10)
 }
 
+function formatMealSummary(meals) {
+  const base = `${meals.count}/${meals.target}`
+  if (meals.intake_avg_pct != null) {
+    return `${base} (평균 ${Math.round(meals.intake_avg_pct)}%)`
+  }
+  return base
+}
+
+function formatEventNote(ev) {
+  const intake = ev.detail?.intake_pct
+  if (intake != null) {
+    const suffix = ev.note ? ` · ${ev.note}` : ''
+    return `섭취 ${Math.round(intake)}%${suffix}`
+  }
+  return ev.note || '-'
+}
+
 function ProgressCard({ title, count, target, percent, unit, note }) {
   const kind = percent >= 100 ? 'on' : percent >= 50 ? 'warn' : 'danger'
   return (
@@ -188,7 +205,7 @@ export default function UserCarePage() {
                     {row.medication_taken.count}/{row.medication_taken.target}
                   </td>
                   <td>
-                    {row.meals.count}/{row.meals.target}
+                    {formatMealSummary(row.meals)}
                   </td>
                 </tr>
               ))}
@@ -225,7 +242,7 @@ export default function UserCarePage() {
                       {ev.quantity} {ev.unit}
                     </td>
                     <td>{ev.source}</td>
-                    <td>{ev.note || '-'}</td>
+                    <td>{formatEventNote(ev)}</td>
                   </tr>
                 ))}
                 {(summary.events || []).length === 0 && (

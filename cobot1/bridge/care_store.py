@@ -244,6 +244,13 @@ class CareStore:
         taken_count = sum(e["quantity"] for e in taken_events)
         meal_count = len(meal_events)
         meal_amount = sum(e["quantity"] for e in meal_events)
+        intake_pcts = [
+            float(e["detail"]["intake_pct"])
+            for e in meal_events
+            if isinstance(e.get("detail"), dict) and e["detail"].get("intake_pct") is not None
+        ]
+        intake_avg_pct = sum(intake_pcts) / len(intake_pcts) if intake_pcts else None
+        intake_latest_pct = intake_pcts[0] if intake_pcts else None
 
         target_prepare = float(targets.get("medication_prepare", 3))
         target_taken = float(targets.get("medication_taken", 3))
@@ -274,8 +281,14 @@ class CareStore:
                 "target": target_meals,
                 "amount_total": meal_amount,
                 "percent": min(100.0, (meal_count / target_meals * 100) if target_meals else 0),
+                "intake_avg_pct": round(intake_avg_pct, 1) if intake_avg_pct is not None else None,
+                "intake_latest_pct": round(intake_latest_pct, 1) if intake_latest_pct is not None else None,
                 "events": meal_events,
-                "note": "식사량 자동 측정은 추후 연동 예정",
+                "note": (
+                    f"평균 섭취 약 {int(round(intake_avg_pct))}% · {meal_count}회"
+                    if intake_avg_pct is not None
+                    else ("기록 없음" if meal_count == 0 else f"{meal_count}회 (섭취율 미측정)")
+                ),
             },
             "events": events,
         }

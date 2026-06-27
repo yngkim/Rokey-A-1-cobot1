@@ -277,7 +277,7 @@ place_on_charger:
   charger_place_home_joint_vel: 20.0     # 최종 home
   charger_place_home_joint_acc: 20.0
 
-# 5. 식판 무게 측정 (식전/식후 % 섭취율) — 그리퍼가 식판을 잡은 상태 전제
+# 5. 식판 무게 측정 (식전/식후 % 섭취율) — 파지 후 Z 상승(post_grasp_carry_lift_mm) 뒤 Fz 샘플
 measure_tray_weight:
   weigh_joint: [30.91, 24.51, 88.49, 17.75, 5.03, -111.1]  # 초기값: user_handoff_joint, 현장 티칭 필요
   weigh_joint_vel: 10.0
@@ -289,3 +289,78 @@ measure_tray_weight:
   phase_mode: auto
   go_home_first: false
   care_user_id: patient_01
+
+# 7. 식판 인계 (가져다주기 / 가져다놓기) — 조인트 deg
+_tray_meal_common: &tray_meal_common
+  tray_grasp_joint: [3.17, 22.17, 108.66, -89.7, 90.47, -49.19]
+  user_handoff_joint: [39.14, 39.13, 104.82, -145.98, 58.95, -19.34]
+  tray_carry_waypoint_joint: [16.44, 24.51, 86.38, -117.87, 39.31, -55.76]
+  post_grasp_carry_lift_mm: 200.0
+  carry_joint_vel: 12.0
+  carry_joint_acc: 12.0
+  tray_grip_force: 120.0
+  grip_settle_sec: 3.0
+  handoff_gripper_timeout_sec: 300.0
+  handoff_prompt_tray_return: "트레이 사용이 끝나면 「트레이 가져가기」 버튼을 눌러 주세요"
+  home_joint_vel: 12.0
+  home_joint_acc: 12.0
+  approach_joint_vel: 12.0
+  approach_joint_acc: 12.0
+  grasp_joint_vel: 8.0
+  grasp_joint_acc: 8.0
+  carry_vel: [20, 15]
+  carry_acc: [40, 30]
+  descend_vel: [12, 8]
+  descend_acc: [24, 16]
+  lift_clearance_mm: 150.0
+  return_home_joint_vel: 12.0
+  return_home_joint_acc: 12.0
+  care_user_id: patient_01
+
+serve_meal:
+  <<: *tray_meal_common
+
+return_tray:
+  <<: *tray_meal_common
+
+calibrate_tray_tare:
+  <<: *tray_meal_common
+
+# 6. 청소 (걸레 파지 → 닦기 → 복귀) — 조인트 deg
+# wipe_joints[i] = (i+1)번 위치 (문장 앞 목록 번호와 무관)
+clean_floor:
+  mop_grasp_joint: [11.89, 43.73, 60.93, -14.25, 37.54, 20.99]   # 걸레 파지
+  mop_lift_joint: [12.29, 39.49, 53.88, -14.16, 47.14, 20.99]     # 걸레 든
+  wipe_joints:
+    - [62.98, 27.70, 87.22, -12.25, 92.0, 157.91]      # 1번 위치
+    - [0.76, -11.16, 133.08, -33.14, 63.68, 109.68]     # 2번 위치
+    - [53.86, 36.25, 73.22, -16.33, 95.21, 148.36]      # 3번 위치
+    - [39.68, 19.39, 95.5, -21.7, 85.64, 137.97]        # 4번 위치
+    - [39.68, 19.39, 95.5, -21.7, 85.64, 137.97]        # 5번: 코드에서 4번 +80mm Z
+    - [35.22, 11.24, 99.6, -23.18, 88.0, 132.36]        # 6번 위치
+    - [16.17, 2.62, 109.48, -28.31, 79.36, 117.3]       # 7번 위치
+    - [16.71, 7.06, 115.71, -29.74, 70.02, 122.67]      # 8번 위치
+    - [-21.94, 7.98, 114.64, -35.67, 52.2, 91.52]       # 9번 위치
+    - [35.41, 44.22, 54.24, -15.13, 87.67, 128.56]      # 10번 위치
+    - [-23.16, 32.03, 75.03, -14.42, 63.78, 73.93]      # 11번 위치
+  tcp_z_offset_mm: 20.0   # 닦기 위치 TCP Z +2cm — 파지·든·4번 제외
+  wipe_z_offset_exempt: [4]   # Z 오프셋 미적용 닦기 번호
+  wipe_5_z_offset_from_4_mm: 80.0   # 5번 = 4번 TCP Z +8cm
+  wipe_3_approach_z_offset_mm: 20.0   # 3번 진입 전 TCP Z +20mm
+  transition_lift_mm: 200.0
+  return_prep_lift_mm: 100.0   # 11번 후 Z +10cm
+  mop_grip_force: 120.0
+  mop_grip_settle_sec: 3.0
+  lift_clearance_mm: 150.0
+  grasp_vel: [15, 10]
+  grasp_acc: [30, 15]
+  carry_vel: [25, 20]
+  carry_acc: [50, 40]
+  wipe_joint_vel: 12.0
+  wipe_joint_acc: 12.0
+  approach_joint_vel: 12.0
+  approach_joint_acc: 12.0
+  return_joint_vel: 12.0
+  return_joint_acc: 12.0
+  return_vel: [25, 20]
+  return_acc: [50, 40]

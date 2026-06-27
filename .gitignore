@@ -10,3 +10,4 @@ log/
 .vscode/
 web/node_modules/
 web/dist/
+config/scenarios.yaml

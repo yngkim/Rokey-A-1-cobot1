@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Type
 
 from cobot1.bridge.handoff_gate import ensure_handoff_gate
+from cobot1.bridge.safety_decision_gate import ensure_safety_decision_gate
 from cobot1.config_loader import load_scenarios
 from cobot1.motion.primitives import MotionContext, RobotMotion
 from cobot1.robot_init import destroy_dsr_node, prepare_autonomous_mode, setup
@@ -64,6 +65,7 @@ def run_task(
         raise ValueError(f"알 수 없는 태스크: {task_name}")
 
     ensure_handoff_gate()
+    ensure_safety_decision_gate()
     scenarios = load_scenarios(config_path, overrides)
     node = setup(node_name or f"cobot1_{task_name}", args=args)
     motion = None

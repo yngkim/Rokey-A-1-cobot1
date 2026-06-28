@@ -86,6 +86,10 @@ class SafetyGuard:
         return self._enabled
 
     @property
+    def config(self) -> dict:
+        return self._cfg
+
+    @property
     def is_aborted(self) -> bool:
         return self._abort.is_set()
 
@@ -236,6 +240,26 @@ class SafetyGuard:
             self._thread.join(timeout=2.0)
         self._thread = None
 
+    def clear_external_force_violation(self) -> None:
+        """외력 일시정지 후 재개 — violation/abort 플래그 해제."""
+        self._violation = None
+        self._abort.clear()
+
+    def restart_monitor(self, task: str) -> None:
+        """pause 중 종료된 모니터 스레드 재시작."""
+        if not self._enabled:
+            return
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+        self._task = task
+        self.clear_external_force_violation()
+        self._thread = threading.Thread(
+            target=self._monitor_loop,
+            name=f"safety_monitor_{task}",
+            daemon=True,
+        )
+        self._thread.start()
+
     def shutdown(self) -> None:
         self.stop()
         if self._executor is not None:
@@ -308,10 +332,12 @@ class SafetyGuard:
         self._violation = violation
         self._abort.set()
         self._publish_alert(violation)
+        step = "safety_pause" if violation.code == "EXTERNAL_FORCE" else "safety_abort"
+        state = "paused" if violation.code == "EXTERNAL_FORCE" else "error"
         self._publish_status(
             self._task,
-            "safety_abort",
-            "error",
+            step,
+            state,
             violation.user_message,
             extra={"code": violation.code, "detail": violation.detail},
         )

@@ -1,0 +1,31 @@
+# 그리퍼 파지 후 물건 유무 검사 (RG2 gwdf 너비 기준)
+grasp_verify:
+  enabled: true
+  max_empty_width_mm: 11.0
+  speech: "대상 물건이 없습니다. 다시 확인해 주세요."
+
+objects:
+  bottle_cap:
+    label: "물병 뚜껑"
+    speech: "물병 뚜껑이 없습니다. 확인 후 다시 시도해 주세요."
+  bottle_body:
+    label: "물병"
+    speech: "물병이 없습니다. 확인 후 다시 시도해 주세요."
+  pill_drawer:
+    label: "약 서랍"
+    speech: "약 서랍을 열 수 없습니다. 서랍 상태를 확인해 주세요."
+  pill_bag:
+    label: "약 봉지"
+    speech: "약 봉지가 없습니다. 확인 후 다시 시도해 주세요."
+  phone:
+    label: "핸드폰"
+    speech: "핸드폰을 찾을 수 없습니다. 거치대를 확인해 주세요."
+  meal_tray:
+    label: "식사 트레이"
+    speech: "식사 트레이가 없습니다. 확인 후 다시 시도해 주세요."
+  mop:
+    label: "청소 도구"
+    speech: "청소 도구를 잡지 못했습니다. 확인 후 다시 시도해 주세요."
+  bottle_cap_screw:
+    label: "물병 뚜껑"
+    speech: "물병 뚜껑이 없습니다. 확인 후 다시 시도해 주세요."

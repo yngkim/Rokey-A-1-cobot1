@@ -168,7 +168,8 @@ class PickPlacePillTask(BaseTask):
                 task, "grasp_drawer", "running",
                 f"서랍 손잡이 파지 중 (닫힘 대기 {drawer_grasp_settle:.1f}초)",
             )
-            motion.gripper.grip(
+            motion.gripper.grip_and_verify(
+                "pill_drawer",
                 force=drawer_grip_force,
                 width_units=0,
                 wait_sec=drawer_grasp_settle,

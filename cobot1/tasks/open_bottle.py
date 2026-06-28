@@ -186,7 +186,8 @@ class OpenBottleTask(BaseTask):
                 task, "regrasp_cap_light", "running",
                 f"약파지 (force={cap_grasp_force_after_open:.0f})",
             )
-            motion.gripper.grip(
+            motion.gripper.grip_and_verify(
+                "bottle_cap",
                 force=cap_grasp_force_after_open,
                 width_units=0,
                 wait_sec=cap_grasp_regrasp_wait,
@@ -257,13 +258,13 @@ class OpenBottleTask(BaseTask):
         steps = [
             ("prepare_home",        _prepare_home),
             ("approach_water_cap",  _approach_water_cap),
-            ("grasp_cap",           motion.gripper.close),
+            ("grasp_cap",           lambda: motion.gripper.close_and_verify("bottle_cap")),
             ("carry_to_cupholder",  _carry_to_cupholder),
             ("lower_into_holder",   _lower_into_holder),
             ("release_in_holder",   motion.gripper.open),
             ("approach_for_reopen", _approach_for_reopen),
             ("descend_to_open_start", _descend_to_open_start),
-            ("regrasp_close",       motion.gripper.close),
+            ("regrasp_close",       lambda: motion.gripper.close_and_verify("bottle_cap")),
             # --- (주석) start_joint + grasp_descent 재파지 ---
             # ("regrasp_move_start",  _regrasp_move_start),
             # ("regrasp_descend",     _regrasp_descend),

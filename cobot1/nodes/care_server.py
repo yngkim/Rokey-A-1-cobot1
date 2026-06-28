@@ -15,6 +15,7 @@ from rclpy.node import Node
 from std_srvs.srv import Trigger
 
 from cobot1.bridge.handoff_gate import ensure_handoff_gate
+from cobot1.bridge.safety_decision_gate import ensure_safety_decision_gate
 from cobot1.robot_config import ROBOT_ID
 from cobot1.config_loader import load_scenarios
 from cobot1.motion.primitives import MotionContext, RobotMotion
@@ -31,6 +32,7 @@ class CareRobotServer(Node):
 
         _ensure_registry()
         ensure_handoff_gate()
+        ensure_safety_decision_gate()
 
         config_path = self.get_parameter("config_path").get_parameter_value().string_value
         self._config_path = config_path or None

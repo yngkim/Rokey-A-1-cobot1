@@ -164,7 +164,8 @@ class PourWaterTask(BaseTask):
                 task, "grasp_body", "running",
                 f"몸통 파지 중 (닫힘 대기 {body_grasp_settle:.1f}초)",
             )
-            motion.gripper.grip(
+            motion.gripper.grip_and_verify(
+                "bottle_body",
                 force=body_grip_force,
                 width_units=body_grip_width,
                 wait_sec=body_grasp_settle,

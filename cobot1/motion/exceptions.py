@@ -36,3 +36,23 @@ class SafetyViolation(CobotError):
     ):
         super().__init__(message, code, user_message)
         self.detail = detail or {}
+
+
+class ObjectMissingError(CobotError):
+    """그리퍼 파지 후 물체가 감지되지 않음."""
+
+    def __init__(
+        self,
+        object_id: str,
+        *,
+        user_message: str = "",
+        speech_text: str = "",
+        object_label: str = "",
+        width_mm: float | None = None,
+    ):
+        self.object_id = object_id
+        self.object_label = object_label
+        self.speech_text = speech_text or user_message
+        msg = user_message or f"물체 없음: {object_id}"
+        super().__init__(msg, "OBJECT_MISSING", user_message or msg)
+        self.width_mm = width_mm

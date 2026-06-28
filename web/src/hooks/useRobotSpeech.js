@@ -22,6 +22,14 @@ const DEFAULT_SPEECH = {
     ack: '네, 청소해 드릴게요.',
     complete: '청소가 끝났어요.',
   },
+  serve_meal: {
+    ack: '네, 식사 가져다 드릴게요.',
+    complete: '식사 가져다 드렸어요.',
+  },
+  return_tray: {
+    ack: '네, 식사 가져갈게요.',
+    complete: '식사 가져갔어요.',
+  },
   global: {
     not_understood: '잘 못 들었어요. 다시 말씀해 주세요.',
     busy: '지금 다른 일을 하고 있어요. 잠시만 기다려 주세요.',

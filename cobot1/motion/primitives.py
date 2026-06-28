@@ -11,9 +11,19 @@ from typing import Callable, Iterable, Sequence
 from rclpy.node import Node
 from std_msgs.msg import String
 
-from cobot1.motion.exceptions import CobotError, MotionError, SafetyViolation, TaskCancelled
+from cobot1.motion.exceptions import (
+    CobotError,
+    MotionError,
+    ObjectMissingError,
+    SafetyViolation,
+    TaskCancelled,
+)
 from cobot1.motion.gripper import Gripper
 from cobot1.motion.safety import SafetyGuard
+from cobot1.motion.safety_decision import (
+    prepare_resume_after_external_force,
+    wait_for_safety_decision,
+)
 
 
 def _normalize_joint_angle(deg: float) -> float:
@@ -113,16 +123,32 @@ class RobotMotion:
         future = client.call_async(self._move_stop_request)
         wait_for_future(future, timeout_sec=2.0, node=self._node)
 
-    def user_stop_recover(self, task: str) -> None:
-        """정지 후 홈 복귀 (cancel 플래그 해제 후 recover)."""
+    def user_stop_recover(
+        self,
+        task: str,
+        *,
+        stopped_step: str = "user_stop",
+        stopped_message: str = "작업을 중지하고 홈으로 복귀합니다.",
+    ) -> None:
+        """정지 후 홈 조인트 복귀 (recovery_joint 무시)."""
+        self._safety.clear_external_force_violation()
+        self.clear_cancel()
+        self.publish_status(
+            task,
+            stopped_step,
+            "stopped",
+            stopped_message,
+            extra={"code": "USER_STOP"},
+        )
         try:
             self.gripper.open()
         except Exception as exc:
             self._node.get_logger().warn(f"정지 시 그리퍼 열기 실패: {exc}")
-        self.clear_cancel()
+        if self._safety.config.get("enabled", True):
+            self._safety.restart_monitor(task)
         self.publish_status(task, "user_stop", "running", "홈 복귀 중")
         try:
-            self.recover_pose(task)
+            self.go_home(task, label="user_stop_home")
             self.publish_status(task, "user_stop", "recovered", "정지 후 홈 복귀 완료")
         except Exception as exc:
             self._node.get_logger().error(f"정지 후 홈 복귀 실패: {exc}")
@@ -771,6 +797,7 @@ class RobotMotion:
         except Exception as exc:
             self._node.get_logger().warn(f"그리퍼 열기 실패: {exc}")
 
+        self._safety.clear_external_force_violation()
         self.clear_cancel()
         try:
             self.recover_pose(task)
@@ -791,53 +818,104 @@ class RobotMotion:
     ) -> None:
         self.clear_cancel()
         self._safety.start(task)
+        safety_cfg = self._safety.config
+        steps_list = list(steps)
         try:
-            for step_name, step_action in steps:
-                self._safety.check_or_raise()
-                self._check_cancel()
-                try:
-                    step_action()
-                except TaskCancelled as exc:
-                    self.publish_status(
-                        task,
-                        step_name,
-                        "stopped",
-                        exc.user_message,
-                        extra={"code": exc.code},
-                    )
-                    self.user_stop_recover(task)
-                    raise
-                except SafetyViolation as exc:
-                    self.publish_status(
-                        task,
-                        step_name,
-                        "error",
-                        exc.user_message,
-                        extra={"code": exc.code},
-                    )
-                    self.safe_abort(task, exc.user_message, exc.code)
-                    raise
-                except CobotError as exc:
-                    user_msg = exc.user_message or str(exc)
-                    self.publish_status(
-                        task,
-                        step_name,
-                        "error",
-                        user_msg,
-                        extra={"code": exc.code},
-                    )
-                    self.safe_abort(task, user_msg, exc.code)
-                    raise
-                except Exception as exc:
-                    user_msg = f"예기치 않은 오류: {exc}"
-                    self.publish_status(
-                        task,
-                        step_name,
-                        "error",
-                        user_msg,
-                        extra={"code": "UNKNOWN_ERROR"},
-                    )
-                    self.safe_abort(task, user_msg, "UNKNOWN_ERROR")
-                    raise MotionError(str(exc), code="UNKNOWN_ERROR", user_message=user_msg) from exc
+            idx = 0
+            while idx < len(steps_list):
+                step_name, step_action = steps_list[idx]
+                while True:
+                    try:
+                        self._safety.check_or_raise()
+                        self._check_cancel()
+                        step_action()
+                        self._safety.check_or_raise()
+                        break
+                    except TaskCancelled as exc:
+                        self.user_stop_recover(
+                            task,
+                            stopped_step=step_name,
+                            stopped_message=exc.user_message or "작업을 중지했습니다.",
+                        )
+                        raise
+                    except SafetyViolation as exc:
+                        if exc.code != "EXTERNAL_FORCE":
+                            self.publish_status(
+                                task,
+                                step_name,
+                                "error",
+                                exc.user_message,
+                                extra={"code": exc.code},
+                            )
+                            self.safe_abort(task, exc.user_message, exc.code)
+                            raise
+                        try:
+                            decision = wait_for_safety_decision(
+                                self,
+                                task,
+                                step_name,
+                                exc,
+                                safety_cfg,
+                            )
+                        except TaskCancelled as cancel_exc:
+                            self.user_stop_recover(
+                                task,
+                                stopped_step=step_name,
+                                stopped_message=(
+                                    cancel_exc.user_message
+                                    or "작업을 중지하고 홈으로 복귀합니다."
+                                ),
+                            )
+                            raise
+                        if decision == "resume":
+                            prepare_resume_after_external_force(
+                                self,
+                                task,
+                                step_name,
+                                safety_cfg,
+                            )
+                            continue
+                        if decision in ("home", "abort"):
+                            self.user_stop_recover(
+                                task,
+                                stopped_step=step_name,
+                                stopped_message="외력 감지 — 작업을 중지하고 홈으로 복귀합니다.",
+                            )
+                            raise TaskCancelled(
+                                "외력 감지 후 작업을 중지했습니다.",
+                                user_message="외력 감지 — 작업을 중지하고 홈으로 복귀합니다.",
+                            ) from exc
+                    except CobotError as exc:
+                        user_msg = exc.user_message or str(exc)
+                        extra: dict[str, Any] = {"code": exc.code}
+                        if isinstance(exc, ObjectMissingError):
+                            extra["speech_text"] = exc.speech_text
+                            extra["object_id"] = exc.object_id
+                            extra["object_label"] = exc.object_label
+                        self.publish_status(
+                            task,
+                            step_name,
+                            "error",
+                            user_msg,
+                            extra=extra,
+                        )
+                        self.safe_abort(task, user_msg, exc.code)
+                        raise
+                    except Exception as exc:
+                        user_msg = f"예기치 않은 오류: {exc}"
+                        self.publish_status(
+                            task,
+                            step_name,
+                            "error",
+                            user_msg,
+                            extra={"code": "UNKNOWN_ERROR"},
+                        )
+                        self.safe_abort(task, user_msg, "UNKNOWN_ERROR")
+                        raise MotionError(
+                            str(exc),
+                            code="UNKNOWN_ERROR",
+                            user_message=user_msg,
+                        ) from exc
+                idx += 1
         finally:
             self._safety.stop()

@@ -158,7 +158,8 @@ def grip_phone(
         "running",
         f"핸드폰 파지 중 ({force / 10:.0f}N)",
     )
-    motion.gripper.grip(
+    motion.gripper.grip_and_verify(
+        "phone",
         force=force,
         width_units=0,
         wait_sec=settle_sec,

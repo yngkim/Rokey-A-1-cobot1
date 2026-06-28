@@ -116,6 +116,7 @@ const STEP_LABELS = {
   home_travel: '홈 방향 이동',
   place_on_pad: '충전기에 놓기',
   user_stop: '정지 중',
+  safety_pause: '외력 감지 — 대기',
   safe_abort: '안전 복귀',
   finish: '완료',
 }

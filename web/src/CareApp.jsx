@@ -8,6 +8,7 @@ import {
   getTaskVoiceHint,
   recordCareEvent,
   runTask,
+  speechCommandIdForTask,
   sendHandoffConfirm,
   setActiveCareUser,
   taskVoiceHintsFromCatalog,
@@ -97,6 +98,7 @@ export default function CareApp() {
     handoffPrompt,
     stopping,
     resetting,
+    safetyDeciding,
     activeTaskLabel,
     status,
     alert,
@@ -105,6 +107,7 @@ export default function CareApp() {
     refreshHealth,
     handleStop,
     handleReset,
+    handleSafetyDecision,
     clearAlert,
     markTaskStarted,
     markVoiceChainStarted,
@@ -245,6 +248,7 @@ export default function CareApp() {
         } else {
           markTaskStarted(taskId)
         }
+        await speech.speakAck(speechCommandIdForTask(taskId))
         showToast(result.message || '작업을 시작했습니다')
         refreshHealth()
       } else {
@@ -328,7 +332,15 @@ export default function CareApp() {
       )}
 
       {alert && (
-        <SafetyAlertModal alert={alert} onClose={clearAlert} onReset={handleReset} resetting={resetting} />
+        <SafetyAlertModal
+          alert={alert}
+          onClose={clearAlert}
+          onReset={handleReset}
+          onResume={() => handleSafetyDecision('resume')}
+          onStopAndHome={() => handleSafetyDecision('home')}
+          resetting={resetting}
+          deciding={safetyDeciding}
+        />
       )}
 
       <VoiceButton

@@ -88,19 +88,12 @@ class ServeMealTask(BaseTask):
                 "running",
                 f"트레이 파지 중 (닫힘 대기 {grip_settle:.1f}초)",
             )
-            motion.gripper.grip(
+            motion.gripper.grip_and_verify(
+                "meal_tray",
                 force=grip_force,
                 width_units=0,
                 wait_sec=grip_settle,
             )
-            if not motion.gripper.is_closed:
-                from cobot1.motion.exceptions import CobotError
-
-                raise CobotError(
-                    "트레이를 잡지 못했습니다.",
-                    code="GRIPPER_NOT_CLOSED",
-                    user_message="트레이 위치를 확인해 주세요.",
-                )
             motion.publish_status(task, "grasp_tray", "done", "트레이 파지 완료")
 
         def _weigh_before() -> None:

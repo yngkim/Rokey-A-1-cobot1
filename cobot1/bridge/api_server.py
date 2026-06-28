@@ -23,6 +23,7 @@ from cobot1.bridge.care_store import (
 )
 from cobot1.bridge.event_store import get_event_store
 from cobot1.bridge.handoff_gate import UserHandoffGate, set_handoff_gate
+from cobot1.bridge.safety_decision_gate import SafetyDecisionGate, set_safety_decision_gate
 from cobot1.bridge.task_session import WebTaskSession
 from cobot1.motion.safety import UNSAFE_ROBOT_STATES
 from cobot1.bridge.voice_config import load_voice_config
@@ -98,10 +99,13 @@ class RosBridge(Node):
         self._active_care_user_id = self._default_care_user_id()
         self._maintenance_mode = False
         self._current_run_id: str | None = None
+        self._active_worker: threading.Thread | None = None
         self._robot_state = -1
         self._robot_state_label = "UNKNOWN"
         self._handoff_gate = UserHandoffGate(on_change=self._broadcast_sync)
         set_handoff_gate(self._handoff_gate)
+        self._safety_decision_gate = SafetyDecisionGate(on_change=self._broadcast_sync)
+        set_safety_decision_gate(self._safety_decision_gate)
 
         self.create_subscription(String, "cobot1/status", self._on_status, 10)
         self.create_subscription(String, "cobot1/safety_alert", self._on_alert, 10)
@@ -297,6 +301,8 @@ class RosBridge(Node):
 
     def force_idle(self, actor: str = "user") -> dict[str, Any]:
         self.audit_action("force_idle", actor=actor)
+        self._task_session.force_abort()
+        self._wait_worker_or_cleanup()
         with self._task_lock:
             self._busy = False
             self._chain_active = False
@@ -305,6 +311,7 @@ class RosBridge(Node):
             self._voice_command_id = ""
             self._current_run_id = None
         self._handoff_gate.clear()
+        self._safety_decision_gate.clear()
         self._broadcast(
             {
                 "type": "task_complete",
@@ -314,10 +321,57 @@ class RosBridge(Node):
         self._broadcast_sync()
         return {"ok": True, "message": "화면 잠금을 해제했습니다."}
 
+    def _is_execution_blocked(self) -> bool:
+        return self._busy or self._task_session.is_running()
+
+    def _task_complete_data(
+        self,
+        task_id: str,
+        success: bool,
+        *,
+        result_code: str | None = None,
+        **extra: Any,
+    ) -> dict[str, Any]:
+        data: dict[str, Any] = {"task": task_id, "success": success, **extra}
+        if not success:
+            data["code"] = result_code or self._task_session.last_result_code
+        return data
+
+    def _launch_worker(self, target, name: str) -> threading.Thread:
+        def _run() -> None:
+            try:
+                target()
+            finally:
+                with self._task_lock:
+                    if self._active_worker is thread:
+                        self._active_worker = None
+
+        thread = threading.Thread(target=_run, name=name, daemon=True)
+        with self._task_lock:
+            self._active_worker = thread
+        thread.start()
+        return thread
+
+    def _wait_worker_or_cleanup(self, timeout_sec: float = 3.0) -> None:
+        with self._task_lock:
+            worker = self._active_worker
+        if worker is not None and worker.is_alive():
+            worker.join(timeout=timeout_sec)
+        if self._task_session.is_running():
+            self.get_logger().warning(
+                "force_idle: worker still active after %.1fs — resetting DSR session"
+                % timeout_sec
+            )
+            try:
+                self._task_session.cleanup()
+            except Exception as exc:
+                self.get_logger().error(f"force_idle session cleanup failed: {exc}")
+
     def _broadcast_sync(self) -> None:
         with self._task_lock:
             sync = {
-                "busy": self._busy,
+                "busy": self._is_execution_blocked(),
+                "session_running": self._task_session.is_running(),
                 "current_task": self._current_task_id,
                 "last_status": self._last_status,
                 "maintenance": self._maintenance_mode,
@@ -325,6 +379,7 @@ class RosBridge(Node):
                 "tray_location": get_tray_location(),
             }
             sync.update(self._handoff_gate.snapshot())
+            sync.update(self._safety_decision_gate.snapshot())
         self._broadcast({"type": "sync", "data": sync})
 
     def _is_terminal_status(self, payload: dict[str, Any]) -> bool:
@@ -332,33 +387,29 @@ class RosBridge(Node):
         step = payload.get("step", "")
         if step == "finish" and state == "done":
             return True
-        if state in ("error", "stopped"):
+        if step == "user_stop" and state in ("recovered", "error", "critical"):
             return True
-        if step in ("safe_abort", "user_stop") and state in (
-            "error",
-            "recovered",
-            "critical",
-        ):
+        if step == "safe_abort" and state in ("recovered", "error", "critical"):
+            return True
+        if state == "error" and step not in ("user_stop", "safe_abort"):
             return True
         return False
 
     def _should_release_busy(self, payload: dict[str, Any]) -> bool:
-        """체인 중간 finish/done 은 busy 유지, 정지·오류는 즉시 해제."""
+        """user_stop/safe_abort 복구는 worker finally 에서 busy 해제. status 는 UI 표시용."""
         if not self._is_terminal_status(payload):
             return False
         state = payload.get("state", "")
         step = payload.get("step", "")
-        if state in ("stopped", "error"):
-            return True
-        if step in ("safe_abort", "user_stop") and state in (
-            "error",
-            "recovered",
-            "critical",
-        ):
-            return True
+        if step == "user_stop" and state in ("recovered", "error", "critical"):
+            return False
+        if step == "safe_abort" and state in ("recovered", "error", "critical"):
+            return False
         if step == "finish" and state == "done":
             return not self._chain_active
-        return not self._chain_active
+        if state == "error" and step not in ("user_stop", "safe_abort"):
+            return True
+        return False
 
     def _on_status(self, msg: String) -> None:
         try:
@@ -379,22 +430,35 @@ class RosBridge(Node):
                 if self._busy:
                     self._current_task_id = payload["task"]
         with self._task_lock:
-            prev_busy = self._busy
+            prev_blocked = self._is_execution_blocked()
             if self._should_release_busy(payload):
                 self._busy = False
-                rel_state = payload.get("state", "")
                 rel_step = payload.get("step", "")
-                if rel_state in ("stopped", "error") or not self._chain_active:
-                    self._chain_active = False
-                    self._chain_abort = False
+                rel_state = payload.get("state", "")
+                if rel_step == "finish" and rel_state == "done":
                     self._current_task_id = ""
                     self._voice_command_id = ""
-                elif rel_step == "finish" and rel_state == "done":
-                    self._current_task_id = ""
-                    self._voice_command_id = ""
-            busy_changed = prev_busy != self._busy
+            blocked = self._is_execution_blocked()
         self._broadcast({"type": "status", "data": payload})
-        if busy_changed:
+        if payload.get("code") == "OBJECT_MISSING":
+            from cobot1.motion.grasp_verify import user_feedback_message
+
+            speech_text = payload.get("speech_text") or user_feedback_message()
+            self._broadcast(
+                {
+                    "type": "object_missing",
+                    "data": {
+                        "code": "OBJECT_MISSING",
+                        "message": speech_text,
+                        "speech_text": speech_text,
+                        "object_id": payload.get("object_id", ""),
+                        "object_label": payload.get("object_label", ""),
+                        "task": payload.get("task", ""),
+                        "step": payload.get("step", ""),
+                    },
+                }
+            )
+        if prev_blocked != blocked:
             self._broadcast_sync()
 
     def _on_alert(self, msg: String) -> None:
@@ -429,7 +493,8 @@ class RosBridge(Node):
         self._ws_clients.add(ws)
         with self._task_lock:
             sync = {
-                "busy": self._busy,
+                "busy": self._is_execution_blocked(),
+                "session_running": self._task_session.is_running(),
                 "current_task": self._current_task_id,
                 "last_status": self._last_status,
                 "maintenance": self._maintenance_mode,
@@ -437,6 +502,7 @@ class RosBridge(Node):
                 "tray_location": get_tray_location(),
             }
             sync.update(self._handoff_gate.snapshot())
+            sync.update(self._safety_decision_gate.snapshot())
         asyncio.run_coroutine_threadsafe(
             ws.send_text(
                 json.dumps({"type": "sync", "data": sync}, ensure_ascii=False)
@@ -549,7 +615,7 @@ class RosBridge(Node):
     def stop_task(self, actor: str = "user") -> dict[str, Any]:
         self.audit_action("stop", actor=actor)
         with self._task_lock:
-            if not self._busy:
+            if not self._is_execution_blocked():
                 if actor == "admin":
                     self.force_idle(actor=actor)
                     return {
@@ -566,6 +632,7 @@ class RosBridge(Node):
             self._chain_active = False
             task_id = self._current_task_id or self._task_session.current_task
         stopped = self._task_session.request_stop()
+        self._safety_decision_gate.clear()
         self._schedule_stop_watchdog(task_id, actor=actor)
         self._broadcast_sync()
         return {
@@ -576,15 +643,14 @@ class RosBridge(Node):
 
     def _schedule_stop_watchdog(self, task_id: str, actor: str = "user") -> None:
         """정지 후에도 busy 가 풀리지 않을 때 UI·상태 강제 해제."""
-        timeout_sec = 30.0 if actor == "admin" else 90.0
+        timeout_sec = 30.0
 
         def _watch() -> None:
             deadline = time.time() + timeout_sec
             while time.time() < deadline:
-                with self._task_lock:
-                    if not self._busy:
-                        self._broadcast_sync()
-                        return
+                if not self._is_execution_blocked():
+                    self._broadcast_sync()
+                    return
                 time.sleep(1.0)
             self.get_logger().warning(
                 "정지 watchdog: busy 강제 해제 (task=%s, actor=%s)" % (task_id, actor)
@@ -685,6 +751,35 @@ class RosBridge(Node):
             "action": action,
         }
 
+    def confirm_safety_decision(self, action: str) -> dict[str, Any]:
+        if action not in ("resume", "abort", "home"):
+            return {
+                "success": False,
+                "message": "action은 resume, abort, home 중 하나여야 합니다.",
+                "code": "INVALID_ACTION",
+            }
+        with self._task_lock:
+            if not self._busy:
+                return {
+                    "success": False,
+                    "message": "실행 중인 작업이 없습니다.",
+                    "code": "NOT_BUSY",
+                }
+        ok, message = self._safety_decision_gate.decide(action)
+        if not ok:
+            return {
+                "success": False,
+                "message": message,
+                "code": "NOT_WAITING",
+            }
+        self._broadcast_sync()
+        return {
+            "success": True,
+            "message": message,
+            "code": "DECIDED",
+            "action": action,
+        }
+
     def handle_voice_command(self, text: str) -> dict[str, Any]:
         command = resolve_voice_command(text)
         if command is None:
@@ -709,7 +804,7 @@ class RosBridge(Node):
             }
 
         with self._task_lock:
-            if self._busy:
+            if self._is_execution_blocked():
                 return {
                     "matched": True,
                     "command_id": command.id,
@@ -840,7 +935,7 @@ class RosBridge(Node):
                 self._end_run(
                     run_id,
                     success=success,
-                    code=None if success else "TASK_FAILED",
+                    code=None if success else self._task_session.last_result_code,
                 )
                 with self._task_lock:
                     self._busy = False
@@ -849,20 +944,16 @@ class RosBridge(Node):
                 self._broadcast(
                     {
                         "type": "task_complete",
-                        "data": {
-                            "task": task_id,
-                            "success": success,
-                            "voice_command_id": command.id,
-                        },
+                        "data": self._task_complete_data(
+                            task_id,
+                            success,
+                            voice_command_id=command.id,
+                        ),
                     }
                 )
                 self._broadcast_sync()
 
-        threading.Thread(
-            target=_worker,
-            name=f"cobot1_voice_{command.id}",
-            daemon=True,
-        ).start()
+        self._launch_worker(_worker, name=f"cobot1_voice_{command.id}")
 
         return {
             "matched": True,
@@ -933,6 +1024,18 @@ class RosBridge(Node):
                 }
 
         with self._task_lock:
+            if self._is_execution_blocked():
+                return {
+                    "matched": True,
+                    "command_id": command.id,
+                    "action": "rejected",
+                    "speech": self._speech_payload("global", "busy"),
+                    "success": False,
+                    "message": "다른 작업이 실행 중입니다.",
+                    "code": "BUSY",
+                }
+
+        with self._task_lock:
             self._busy = True
             self._chain_active = True
             self._chain_abort = False
@@ -958,6 +1061,7 @@ class RosBridge(Node):
             failed_task = ""
             aborted = False
             last_run_id: str | None = None
+            fail_code = "TASK_FAILED"
             try:
                 for task_id in task_ids:
                     with self._task_lock:
@@ -974,11 +1078,12 @@ class RosBridge(Node):
                     self._end_run(
                         run_id,
                         success=task_ok,
-                        code=None if task_ok else "TASK_FAILED",
+                        code=None if task_ok else self._task_session.last_result_code,
                     )
                     if not task_ok:
                         success = False
                         failed_task = task_id
+                        fail_code = self._task_session.last_result_code
                         break
                     self._apply_phone_task_result(task_id)
                     self._apply_tray_task_result(task_id)
@@ -1002,22 +1107,19 @@ class RosBridge(Node):
                 self._broadcast(
                     {
                         "type": "task_complete",
-                        "data": {
-                            "task": failed_task or task_ids[-1],
-                            "success": success,
-                            "voice_command_id": command.id,
-                            "chain": True,
-                            "aborted": aborted,
-                        },
+                        "data": self._task_complete_data(
+                            failed_task or task_ids[-1],
+                            success,
+                            result_code=None if success else fail_code,
+                            voice_command_id=command.id,
+                            chain=True,
+                            aborted=aborted,
+                        ),
                     }
                 )
                 self._broadcast_sync()
 
-        threading.Thread(
-            target=_worker,
-            name=f"cobot1_voice_{command.id}",
-            daemon=True,
-        ).start()
+        self._launch_worker(_worker, name=f"cobot1_voice_{command.id}")
 
         return {
             "matched": True,
@@ -1059,7 +1161,7 @@ class RosBridge(Node):
 
         if task_id == "prepare_medication":
             with self._task_lock:
-                if self._busy:
+                if self._is_execution_blocked():
                     return {
                         "success": False,
                         "message": "다른 작업이 실행 중입니다. 완료 후 다시 시도해 주세요.",
@@ -1097,7 +1199,7 @@ class RosBridge(Node):
                 time.sleep(1.0)
                 self._busy = False
                 self._current_task_id = ""
-            elif self._busy:
+            elif self._is_execution_blocked():
                 return {
                     "success": False,
                     "message": "다른 작업이 실행 중입니다. 완료 후 다시 시도해 주세요.",
@@ -1140,7 +1242,7 @@ class RosBridge(Node):
                 self._end_run(
                     run_id,
                     success=success,
-                    code=None if success else "TASK_FAILED",
+                    code=None if success else self._task_session.last_result_code,
                 )
                 with self._task_lock:
                     self._busy = False
@@ -1148,16 +1250,12 @@ class RosBridge(Node):
                 self._broadcast(
                     {
                         "type": "task_complete",
-                        "data": {"task": task_id, "success": success},
+                        "data": self._task_complete_data(task_id, success),
                     }
                 )
                 self._broadcast_sync()
 
-        threading.Thread(
-            target=_worker,
-            name=f"cobot1_web_{task_id}",
-            daemon=True,
-        ).start()
+        self._launch_worker(_worker, name=f"cobot1_web_{task_id}")
 
         return {
             "success": True,
@@ -1317,6 +1415,10 @@ class HandoffConfirmRequest(BaseModel):
     action: str
 
 
+class SafetyDecisionRequest(BaseModel):
+    action: str
+
+
 class ActiveCareUserRequest(BaseModel):
     user_id: str
 
@@ -1399,7 +1501,8 @@ def create_app():
             "ok": True,
             "api_ok": True,
             "robot_ready": robot_ready,
-            "busy": bridge._busy,
+            "busy": bridge._is_execution_blocked(),
+            "session_running": bridge._task_session.is_running(),
             "maintenance": bridge._maintenance_mode,
             "current_task": bridge._current_task_id,
             "current_task_label": label,
@@ -1413,6 +1516,7 @@ def create_app():
             "tray_return_available": can_return_tray(),
             "handoff_action": bridge._handoff_gate.snapshot().get("handoff_action"),
             "handoff_prompt": bridge._handoff_gate.snapshot().get("handoff_prompt"),
+            **bridge._safety_decision_gate.snapshot(),
         }
 
     @app.get("/api/tasks")
@@ -1452,6 +1556,18 @@ def create_app():
         if bridge is None:
             raise HTTPException(status_code=503, detail="ROS bridge 초기화 중")
         result = bridge.confirm_handoff(body.action)
+        if not result.get("success"):
+            code = result.get("code", "ERROR")
+            status = 409 if code == "NOT_WAITING" else 400
+            raise HTTPException(status_code=status, detail=result.get("message"))
+        return result
+
+    @app.post("/api/safety/decision")
+    def safety_decision(body: SafetyDecisionRequest):
+        bridge = bridge_holder.get("bridge")
+        if bridge is None:
+            raise HTTPException(status_code=503, detail="ROS bridge 초기화 중")
+        result = bridge.confirm_safety_decision(body.action)
         if not result.get("success"):
             code = result.get("code", "ERROR")
             status = 409 if code == "NOT_WAITING" else 400
@@ -1527,7 +1643,8 @@ def create_app():
         bridge.refresh_robot_ready()
         with bridge._task_lock:
             payload = {
-                "busy": bridge._busy,
+                "busy": bridge._is_execution_blocked(),
+                "session_running": bridge._task_session.is_running(),
                 "current_task": bridge._current_task_id,
                 "last_status": bridge._last_status,
             }

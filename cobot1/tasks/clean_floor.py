@@ -142,7 +142,8 @@ class CleanFloorTask(BaseTask):
                 task, "grasp_mop", "running",
                 f"걸레 파지 중 (닫힘 대기 {mop_grip_settle:.1f}초)",
             )
-            motion.gripper.grip(
+            motion.gripper.grip_and_verify(
+                "mop",
                 force=mop_grip_force,
                 width_units=0,
                 wait_sec=mop_grip_settle,

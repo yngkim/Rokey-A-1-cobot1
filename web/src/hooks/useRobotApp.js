@@ -5,38 +5,40 @@ import {
   checkHealth,
   connectWebSocket,
   fetchTasks,
+  forceIdle,
   resetRobot,
+  sendSafetyDecision,
+  speechCommandIdForTask,
   stopTask,
   taskLabelById,
 } from '../api/client'
 
-function isTerminalStatus(data) {
+const OBJECT_MISSING_MESSAGE = '대상 물건이 없습니다. 다시 확인해 주세요.'
+
+function shouldShowStatusToast(data, voiceChainActive) {
   const state = data?.state
   const step = data?.step
-  if (step === 'finish' && state === 'done') return true
-  if (state === 'error' || state === 'stopped') return true
-  if (
-    (step === 'safe_abort' || step === 'user_stop') &&
-    ['error', 'recovered', 'critical'].includes(state)
-  ) {
-    return true
-  }
+  if (data?.code === 'OBJECT_MISSING') return false
+  if (step === 'finish' && state === 'done') return !voiceChainActive
+  if (state === 'error' && step !== 'user_stop' && step !== 'safe_abort') return true
+  if (step === 'user_stop' && state === 'recovered') return true
   return false
 }
 
-function shouldClearBusy(data, voiceChainActive) {
-  if (!isTerminalStatus(data)) return false
-  const state = data?.state
-  const step = data?.step
-  if (state === 'stopped' || state === 'error') return true
-  if (
-    (step === 'safe_abort' || step === 'user_stop') &&
-    ['error', 'recovered', 'critical'].includes(state)
-  ) {
-    return true
+/** sync/health의 safety_decision_pending으로 외력 팝업 표시·해제 */
+function syncSafetyAlertFromGate(setAlert, data) {
+  if (data?.safety_decision_pending) {
+    setAlert({
+      code: 'EXTERNAL_FORCE',
+      message:
+        data.safety_pause_message ||
+        '로봇 동작이 안전을 위해 중단되었습니다. 주변을 확인해 주세요.',
+      task: data.safety_pause_task || '',
+      timestamp: Date.now(),
+    })
+    return
   }
-  if (step === 'finish' && state === 'done') return !voiceChainActive
-  return !voiceChainActive
+  setAlert((prev) => (prev?.code === 'EXTERNAL_FORCE' ? null : prev))
 }
 
 const VOICE_TASK_LABELS = {
@@ -54,6 +56,7 @@ export function useRobotApp(speechRef) {
   const [maintenance, setMaintenance] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [resetting, setResetting] = useState(false)
+  const [safetyDeciding, setSafetyDeciding] = useState(false)
   const [activeTaskId, setActiveTaskId] = useState('')
   const [activeTaskLabel, setActiveTaskLabel] = useState('')
   const [status, setStatus] = useState(null)
@@ -95,8 +98,23 @@ export function useRobotApp(speechRef) {
       detail: data?.detail || null,
       timestamp: data?.timestamp || Date.now(),
     })
-    clearBusy()
+    if (data?.code !== 'EXTERNAL_FORCE') {
+      clearBusy()
+    }
   }, [clearBusy, speechRef])
+
+  const showObjectMissingAlert = useCallback((data) => {
+    const message = data?.message || data?.speech_text || OBJECT_MISSING_MESSAGE
+    speechRef?.current?.cancelSpeech?.()
+    speechRef?.current?.speakText?.(message)
+    setAlert({
+      code: 'OBJECT_MISSING',
+      message,
+      objectLabel: data?.object_label || '',
+      task: data?.task || '',
+      timestamp: Date.now(),
+    })
+  }, [speechRef])
 
   const showToast = useCallback((message, level = 'info') => {
     setToast({ message, level, id: Date.now() })
@@ -118,6 +136,7 @@ export function useRobotApp(speechRef) {
       setResetting(false)
       voiceChainRef.current = false
     }
+    syncSafetyAlertFromGate(setAlert, data)
   }, [])
 
   const updateTaskLabel = useCallback((taskId, labelFromHealth) => {
@@ -145,6 +164,7 @@ export function useRobotApp(speechRef) {
           setStopping(false)
           voiceChainRef.current = false
         }
+        syncSafetyAlertFromGate(setAlert, h)
         return h
       })
       .catch(() => {
@@ -172,17 +192,28 @@ export function useRobotApp(speechRef) {
       const result = await stopTask()
       showToast(result.message || '정지 요청을 보냈습니다', 'info')
       if (!result.success) {
-        setStopping(false)
+        const h = await refreshHealth()
+        if (h && !h.busy) {
+          clearBusy()
+        } else {
+          setStopping(false)
+        }
         return
       }
-      stopTimeoutRef.current = setTimeout(() => {
+      stopTimeoutRef.current = setTimeout(async () => {
+        try {
+          await forceIdle()
+        } catch {
+          /* ignore — still refresh below */
+        }
         clearBusy()
         refreshHealth()
         showToast('정지 처리가 지연되어 화면을 초기화했습니다', 'info')
-      }, 90000)
+      }, 30000)
     } catch (err) {
       showToast(err.message, 'error')
       setStopping(false)
+      refreshHealth()
     }
   }, [clearBusy, clearStopTimeout, refreshHealth, showToast, stopping])
 
@@ -200,6 +231,24 @@ export function useRobotApp(speechRef) {
     }
   }, [resetting, showToast])
 
+  const handleSafetyDecision = useCallback(async (action) => {
+    if (safetyDeciding) return
+    setSafetyDeciding(true)
+    try {
+      const result = await sendSafetyDecision(action)
+      setAlert(null)
+      if (action === 'resume') {
+        showToast(result.message || '작업을 재개합니다', 'info')
+      } else {
+        showToast(result.message || '작업을 중지하고 홈으로 복귀합니다', 'info')
+      }
+    } catch (err) {
+      showToast(err.message || '선택 반영 실패', 'error')
+    } finally {
+      setSafetyDeciding(false)
+    }
+  }, [safetyDeciding, showToast])
+
   useEffect(() => {
     refreshHealth()
 
@@ -211,6 +260,19 @@ export function useRobotApp(speechRef) {
 
       if (msg.type === 'maintenance') {
         setMaintenance(!!msg.data?.enabled)
+        return
+      }
+
+      if (msg.type === 'object_missing') {
+        showObjectMissingAlert(msg.data)
+        return
+      }
+
+      if (msg.type === 'speech') {
+        const text = msg.data?.text
+        if (text) {
+          speechRef?.current?.speakText?.(text)
+        }
         return
       }
 
@@ -228,14 +290,25 @@ export function useRobotApp(speechRef) {
           if (data.success) {
             showToast('작업이 완료되었습니다')
             speech?.speakComplete?.(data.voice_command_id)
+          } else if (data.code === 'OBJECT_MISSING') {
+            /* 팝업·TTS는 object_missing 이벤트에서 처리 */
           } else {
             showToast('작업 중 오류가 발생했습니다', 'error')
             speech?.speakGlobal?.('error')
           }
           return
         }
+        const speechId = speechCommandIdForTask(data.task)
         if (data.success) {
           showToast('작업이 완료되었습니다')
+          if (speechId) {
+            speech?.speakComplete?.(speechId)
+          }
+        } else if (data.code === 'OBJECT_MISSING') {
+          /* 팝업·TTS는 object_missing 이벤트에서 처리 */
+        } else {
+          showToast('작업 중 오류가 발생했습니다', 'error')
+          speech?.speakGlobal?.('error')
         }
         return
       }
@@ -246,39 +319,35 @@ export function useRobotApp(speechRef) {
         const step = msg.data?.step
         if (msg.data?.task) setActiveTaskId(msg.data.task)
 
-        if (shouldClearBusy(msg.data, voiceChainRef.current)) {
-          if (state === 'stopped' || state === 'error' || step === 'user_stop') {
-            voiceChainRef.current = false
-          }
-          clearBusy()
-          refreshHealth()
+        if (shouldShowStatusToast(msg.data, voiceChainRef.current)) {
           if (step === 'finish' && state === 'done') {
             showToast('작업이 완료되었습니다')
           }
           if (state === 'error') {
             showToast(msg.data.message || '오류 발생', 'error')
           }
-          if (state === 'stopped') {
-            showToast(msg.data.message || '작업이 중단되었습니다', 'info')
-          }
           if (step === 'user_stop' && state === 'recovered') {
             showToast('정지 후 홈 복귀가 완료되었습니다', 'info')
           }
-          return
         }
 
-        if (state === 'stopping' || step === 'user_stop') setStopping(true)
+        if (state === 'stopping' || (step === 'user_stop' && state === 'running')) {
+          setStopping(true)
+        }
 
-        if (
-          msg.data?.code === 'EXTERNAL_FORCE' ||
-          msg.data?.step === 'safety_abort'
-        ) {
+        if (msg.data?.code === 'OBJECT_MISSING') {
+          showObjectMissingAlert(msg.data)
+        }
+
+        if (step === 'safety_abort' && state === 'error') {
           showSafetyAlert(msg.data)
         }
       }
 
       if (msg.type === 'safety_alert') {
-        showSafetyAlert(msg.data)
+        if (msg.data?.code !== 'EXTERNAL_FORCE') {
+          showSafetyAlert(msg.data)
+        }
       }
     })
     wsRef.current = ws
@@ -290,7 +359,7 @@ export function useRobotApp(speechRef) {
       clearStopTimeout()
       ws.close()
     }
-  }, [applySync, clearBusy, clearStopTimeout, refreshHealth, showSafetyAlert, showToast, speechRef])
+  }, [applySync, clearBusy, clearStopTimeout, refreshHealth, showObjectMissingAlert, showSafetyAlert, showToast, speechRef])
 
   return {
     tasks,
@@ -312,7 +381,9 @@ export function useRobotApp(speechRef) {
     refreshHealth,
     handleStop,
     handleReset,
+    handleSafetyDecision,
     resetting,
+    safetyDeciding,
     clearAlert: () => setAlert(null),
     markTaskStarted: (taskId) => {
       setBusy(true)

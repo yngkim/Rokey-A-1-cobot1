@@ -45,6 +45,29 @@ export function getTaskVoiceHint(taskId, hints = {}) {
   return hints[taskId] || FALLBACK_TASK_VOICE_HINTS[taskId] || ''
 }
 
+const FALLBACK_SPEECH_COMMAND_IDS = {
+  pick_from_charger: 'pick_phone',
+  place_on_charger: 'place_phone',
+  serve_meal: 'serve_meal',
+  return_tray: 'return_tray',
+  clean_floor: 'clean_floor',
+  prepare_medication: 'prepare_medication',
+}
+
+/** CareApp task id → voice_commands.yaml speech 키 */
+export function speechCommandIdForTask(taskId, catalog) {
+  if (!taskId) return ''
+  for (const cmd of catalog?.commands || []) {
+    if (cmd.action === 'run_task' && cmd.task_id === taskId) {
+      return cmd.id
+    }
+    if (cmd.action === 'run_chain' && cmd.id === taskId) {
+      return cmd.id
+    }
+  }
+  return FALLBACK_SPEECH_COMMAND_IDS[taskId] || taskId
+}
+
 export async function sendVoiceCommand(text) {
   const res = await fetch(`${API_BASE}/api/voice/command`, {
     method: 'POST',
@@ -159,6 +182,17 @@ export async function resetRobot() {
   const res = await fetch(`${API_BASE}/api/reset`, { method: 'POST' })
   const data = await res.json()
   if (!res.ok) throw new Error(data.detail || data.message || '초기화 실패')
+  return data
+}
+
+export async function sendSafetyDecision(action) {
+  const res = await fetch(`${API_BASE}/api/safety/decision`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action }),
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.detail || data.message || '선택 반영 실패')
   return data
 }
 

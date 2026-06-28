@@ -319,3 +319,35 @@ class Gripper:
             self._closed = True
             return
         self.close()
+
+    def read_width_mm(self) -> float | None:
+        """RG2 Modbus gwdf(mm). 미지원 드라이버는 None."""
+        if self._driver == DRIVER_ONROBOT_RG2:
+            return self._rg2_client().read_width_mm()
+        if self._driver == DRIVER_ONROBOT_ROS:
+            self._log("[gripper] onrobot_ros — grasp width read 미지원, 검사 스킵")
+            return None
+        if self._driver == DRIVER_SIMULATED:
+            return None
+        return None
+
+    def close_and_verify(self, object_id: str) -> None:
+        """닫기 후 물체 유무 검사."""
+        from cobot1.motion.grasp_verify import verify_object_grasped
+
+        self.close()
+        verify_object_grasped(self, object_id)
+
+    def grip_and_verify(
+        self,
+        object_id: str,
+        *,
+        force: float | None = None,
+        width_units: int = 0,
+        wait_sec: float | None = None,
+    ) -> None:
+        """약파지/닫기 후 물체 유무 검사."""
+        from cobot1.motion.grasp_verify import verify_object_grasped
+
+        self.grip(force=force, width_units=width_units, wait_sec=wait_sec)
+        verify_object_grasped(self, object_id)

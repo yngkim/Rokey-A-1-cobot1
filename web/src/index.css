@@ -198,6 +198,11 @@ body.admin-mode #root {
   box-shadow: 0 20px 60px rgba(255, 40, 40, 0.35);
 }
 
+.safety-modal--missing {
+  border-color: rgba(251, 191, 36, 0.65);
+  box-shadow: 0 20px 60px rgba(251, 191, 36, 0.2);
+}
+
 .safety-modal-icon {
   font-size: 3rem;
   line-height: 1;
@@ -266,6 +271,11 @@ body.admin-mode #root {
 
 .safety-modal-btn--reset {
   background: var(--accent);
+}
+
+.safety-modal-btn--primary {
+  background: #15803d;
+  color: #fff;
 }
 
 .safety-modal-btn--reset:disabled {

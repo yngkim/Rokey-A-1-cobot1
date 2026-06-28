@@ -19,6 +19,9 @@ _DEFAULT_MAX_FORCE = 400
 _DEFAULT_MAX_WIDTH = 1100
 _RCTR_MOVE = 16
 _STATUS_REGISTER = 268
+_STATUS_BLOCK_START = 258
+_STATUS_BLOCK_COUNT = 18
+_GWDF_INDEX = 17
 # cobot1 시나리오 width_units: 0.01mm/단위 (5000=50mm). OnRobot rgwd: 값/10000=m
 _COBOT_WIDTH_TO_RGWD = 10
 
@@ -129,6 +132,31 @@ class Rg2ModbusClient:
         f = int(force) if force is not None else self._max_force
         rgwd = int(width_units) // _COBOT_WIDTH_TO_RGWD if width_units > 0 else 0
         self._write_command(f, rgwd, _RCTR_MOVE)
+
+    def read_width_mm(self) -> float:
+        """현재 손가락 간격(gwdf) mm. fingertip offset 반영."""
+        self.connect()
+        with self._lock:
+            assert self._client is not None
+            result = self._client.read_holding_registers(
+                address=_STATUS_BLOCK_START,
+                count=_STATUS_BLOCK_COUNT,
+                device_id=self._changer_addr,
+            )
+        if result.isError():
+            raise MotionError(
+                f"RG2 너비 읽기 실패: {result}",
+                code="GRIPPER_STATUS_READ_FAILED",
+                user_message="그리퍼 상태를 읽지 못했습니다.",
+            )
+        registers = result.registers
+        if len(registers) <= _GWDF_INDEX:
+            raise MotionError(
+                "RG2 상태 응답 길이 부족",
+                code="GRIPPER_STATUS_READ_FAILED",
+                user_message="그리퍼 상태를 읽지 못했습니다.",
+            )
+        return float(registers[_GWDF_INDEX]) / 10.0
 
     def is_busy(self) -> bool:
         """gsta bit0 — 1 이면 그리퍼 동작 중."""

@@ -149,7 +149,7 @@ class CloseBottleTask(BaseTask):
                                   vel=grasp_vel, acc=grasp_acc)
 
         def _grasp_cap_gently() -> None:
-            motion.gripper.grip(force=grip_force)
+            motion.gripper.grip_and_verify("bottle_cap", force=grip_force)
 
         def _grasp_settle() -> None:
             motion.publish_status(task, "grasp_settle", "running",
@@ -235,7 +235,8 @@ class CloseBottleTask(BaseTask):
             )
 
         def _regrasp_for_screw() -> None:
-            motion.gripper.grip(
+            motion.gripper.grip_and_verify(
+                "bottle_cap_screw",
                 force=cap_screw_grasp_force,
                 wait_sec=cap_screw_grasp_wait,
             )
@@ -252,7 +253,8 @@ class CloseBottleTask(BaseTask):
                 joints, "screw_j6_unwind", task,
                 vel=screw_j6_unwind_vel, acc=screw_j6_unwind_vel,
             )
-            motion.gripper.grip(
+            motion.gripper.grip_and_verify(
+                "bottle_cap_screw",
                 force=cap_screw_grasp_force,
                 wait_sec=cap_screw_grasp_wait,
             )
@@ -292,7 +294,7 @@ class CloseBottleTask(BaseTask):
 
         def _regrasp_for_carry() -> None:
             motion.gripper.open()
-            motion.gripper.grip(force=regrasp_force)
+            motion.gripper.grip_and_verify("bottle_cap", force=regrasp_force)
 
         def _carry_water_to_initial() -> None:
             motion.carry_to_pose(

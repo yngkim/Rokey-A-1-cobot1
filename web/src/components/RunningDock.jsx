@@ -1,3 +1,5 @@
+import { createPortal } from 'react-dom'
+
 const STEP_LABELS = {
   home: '홈 위치 이동',
   go_home: '홈 위치 이동',
@@ -14,7 +16,7 @@ const STEP_LABELS = {
   approach_bottle: '병 접근',
   descend_to_cap: '뚜껑 위치로 하강',
   move_search_start: '탐색 위치 이동',
-  probe_down: '뚜껑 높이 탐색',
+  probe_down: '뚜껑 접촉 탐색',
   align_cap_grasp: '뚜껑 잡기 위치',
   cap_grasped: '뚜껑 잡기',
   search_lift: '탐색 높이로 상승',
@@ -83,6 +85,9 @@ const STEP_LABELS = {
   lift_after_grasp: '파지 후 수직 상승',
   release_phone: '핸드폰 놓기',
   grip_cap: '뚜껑 잡기',
+  approach_floor_cap: '바닥 뚜껑 접근',
+  grasp_cap: '바닥 뚜껑 파지',
+  lift_cap_off_floor: '뚜껑 들어올리기',
   grip_pill: '알약 집기',
   twist_open: '뚜껑 돌리기',
   soft_release_cap: '뚜껑 살살 놓기',
@@ -90,6 +95,7 @@ const STEP_LABELS = {
   close_empty_gripper: '빈 그리퍼 닫기',
   press_cap_center: '뚜껑 중앙 누르기',
   press_approach: '누르기 접근',
+  lift_before_open: '접촉 후 Z 상승',
   open_for_regrasp: '재파지 준비 (열기)',
   descend_for_screw: '조임 위치 하강',
   regrasp_for_screw: '조임용 재파지',
@@ -135,16 +141,17 @@ export default function RunningDock({
   onHandoffConfirm,
   onStop,
   stopping,
+  layout = 'phone',
 }) {
   if (!busy) return null
 
   const handoffLabel =
     handoffAction === 'tray_return' ? '트레이 가져가기' : null
 
-  return (
+  const dock = (
     <>
       <div className="run-overlay" aria-hidden="true" />
-      <div className="running-dock" role="status">
+      <div className={`running-dock running-dock--${layout}`} role="status" aria-live="polite">
         <div className="running-dock-pulse" />
         <div className="running-dock-body">
           <div className="running-dock-info">
@@ -178,4 +185,6 @@ export default function RunningDock({
       </div>
     </>
   )
+
+  return createPortal(dock, document.body)
 }

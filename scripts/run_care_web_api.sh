@@ -32,6 +32,11 @@ if ! python3 -c "import fastapi" 2>/dev/null; then
   pip3 install --user -r "${REQ}"
 fi
 
+if ! python3 -c "import edge_tts" 2>/dev/null; then
+  echo "edge-tts 설치 중 (미디어 TTS)..."
+  pip3 install --user edge-tts
+fi
+
 echo "ROS_DOMAIN_ID=${ROS_DOMAIN_ID}"
 echo "웹 UI: http://$(hostname -I | awk '{print $1}'):8080"
 exec ros2 run cobot1 care_web_api "$@"

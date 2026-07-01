@@ -96,6 +96,38 @@ def get_chain_task_ids(
     return ()
 
 
+def voice_command_id_for_task(
+    task_id: str,
+    config: dict[str, Any] | None = None,
+) -> str:
+    """태스크 ID → 음성 명령 ID (프론트 speechCommandIdForTask 와 동일)."""
+    tid = task_id.strip()
+    if not tid:
+        return ""
+    data = config if config is not None else load_voice_config()
+    for item in data.get("commands", []):
+        action = str(item.get("action", ""))
+        if action == "run_task" and str(item.get("task_id", "")) == tid:
+            return str(item["id"])
+        if action == "run_chain" and str(item.get("id", "")) == tid:
+            return str(item["id"])
+    fallback = {
+        "pick_from_charger": "pick_phone",
+        "place_on_charger": "place_phone",
+    }
+    return fallback.get(tid, tid)
+
+
+def get_wake_word_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    data = config if config is not None else load_voice_config()
+    wake = data.get("wake_word") or {}
+    phrases = [str(p).strip() for p in (wake.get("phrases") or ["돌봄아"]) if str(p).strip()]
+    return {
+        "phrases": phrases or ["돌봄아"],
+        "response": str(wake.get("response", "네. 말씀하세요.")),
+    }
+
+
 def get_voice_catalog(config: dict[str, Any] | None = None) -> dict[str, Any]:
     data = config if config is not None else load_voice_config()
     commands = []
@@ -117,4 +149,5 @@ def get_voice_catalog(config: dict[str, Any] | None = None) -> dict[str, Any]:
         "commands": commands,
         "speech": data.get("speech", {}),
         "labels": data.get("labels", {}),
+        "wake_word": get_wake_word_config(data),
     }

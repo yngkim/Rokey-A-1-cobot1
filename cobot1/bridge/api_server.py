@@ -21,6 +21,10 @@ from cobot1.bridge.care_store import (
     EVENT_MEDICATION_TAKEN,
     get_care_store,
 )
+from cobot1.bridge.medication_schedule import (
+    MedicationScheduleRunner,
+    get_medication_schedule_store,
+)
 from cobot1.bridge.event_store import get_event_store
 from cobot1.bridge.handoff_gate import UserHandoffGate, set_handoff_gate
 from cobot1.bridge.safety_decision_gate import SafetyDecisionGate, set_safety_decision_gate
@@ -33,6 +37,7 @@ from cobot1.bridge.voice_intent import (
     get_speech,
     get_voice_catalog,
     resolve_voice_command,
+    voice_command_id_for_task,
 )
 from cobot1.robot_config import ROBOT_ID
 from cobot1.runtime_state import (
@@ -107,9 +112,19 @@ class RosBridge(Node):
         self._safety_decision_gate = SafetyDecisionGate(on_change=self._broadcast_sync)
         set_safety_decision_gate(self._safety_decision_gate)
 
+        self._med_schedule_store = get_medication_schedule_store()
+        self._med_runner = MedicationScheduleRunner(
+            self._med_schedule_store,
+            start_task=lambda tid, uid: self.start_task(tid, user_id=uid),
+            is_blocked=self._is_execution_blocked,
+            get_active_user_id=lambda: self._active_care_user_id,
+            on_trigger=self._on_medication_auto_trigger,
+        )
+
         self.create_subscription(String, "cobot1/status", self._on_status, 10)
         self.create_subscription(String, "cobot1/safety_alert", self._on_alert, 10)
         self.create_timer(2.0, self._poll_robot_state)
+        self.create_timer(30.0, self._med_schedule_tick)
 
         from dsr_msgs2.srv import SetRobotControl, SetRobotMode
 
@@ -124,6 +139,80 @@ class RosBridge(Node):
             "care_web_bridge 준비 (namespace=%s, robot_ready=%s)"
             % (ROBOT_ID, self._robot_ready)
         )
+
+    def _med_schedule_tick(self) -> None:
+        try:
+            self._med_runner.tick()
+        except Exception as exc:
+            self.get_logger().warning(f"약 스케줄 확인 실패: {exc}")
+
+    def _on_medication_auto_trigger(self, payload: dict[str, Any]) -> None:
+        self._broadcast({"type": "medication_auto", "data": payload})
+        if payload.get("success"):
+            self._broadcast(
+                {
+                    "type": "speech",
+                    "data": self._speech_payload("prepare_medication", "ack"),
+                }
+            )
+
+    def list_medication_schedules(self, user_id: str | None = None) -> list[dict[str, Any]]:
+        uid = user_id or self._active_care_user_id
+        return self._med_schedule_store.list_by_user(uid)
+
+    def create_medication_schedule(
+        self,
+        data: dict[str, Any],
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        uid = (user_id or data.get("user_id") or self._active_care_user_id).strip()
+        if self._care.get_user(uid) is None:
+            return {
+                "success": False,
+                "message": "등록되지 않은 사용자입니다.",
+                "code": "NOT_FOUND",
+            }
+        try:
+            schedule = self._med_schedule_store.create(uid, data)
+        except ValueError as exc:
+            return {"success": False, "message": str(exc), "code": "INVALID"}
+        self._broadcast_sync()
+        return {"success": True, "schedule": schedule}
+
+    def update_medication_schedule(
+        self,
+        schedule_id: str,
+        data: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            schedule = self._med_schedule_store.update(schedule_id, data)
+        except ValueError as exc:
+            return {"success": False, "message": str(exc), "code": "INVALID"}
+        self._broadcast_sync()
+        return {"success": True, "schedule": schedule}
+
+    def delete_medication_schedule(self, schedule_id: str) -> dict[str, Any]:
+        deleted = self._med_schedule_store.delete(schedule_id)
+        if not deleted:
+            return {
+                "success": False,
+                "message": "저장된 약 시간을 찾을 수 없습니다.",
+                "code": "NOT_FOUND",
+            }
+        self._broadcast_sync()
+        return {"success": True, "message": "약 시간을 삭제했습니다."}
+
+    def _notify_meal_for_medication(self, user_id: str, meal_ts: float | None = None) -> None:
+        try:
+            self._med_runner.on_meal_event(user_id, meal_ts=meal_ts)
+        except Exception as exc:
+            self.get_logger().warning(f"식후 약 스케줄 등록 실패: {exc}")
+
+    def _after_task_success(self, task_id: str, user_id: str | None = None) -> None:
+        self._apply_phone_task_result(task_id)
+        self._apply_tray_task_result(task_id)
+        if task_id == "serve_meal":
+            self._notify_meal_for_medication(user_id or self._active_care_user_id)
 
     def _default_care_user_id(self) -> str:
         users = self._care.list_users()
@@ -178,6 +267,8 @@ class RosBridge(Node):
             actor=source,
             detail={"user_id": uid, "event_type": event_type, "quantity": quantity},
         )
+        if event_type == EVENT_MEAL:
+            self._notify_meal_for_medication(uid, meal_ts=event.get("ts"))
         return event
 
     def _log_prepare_medication_care(
@@ -440,6 +531,22 @@ class RosBridge(Node):
                     self._voice_command_id = ""
             blocked = self._is_execution_blocked()
         self._broadcast({"type": "status", "data": payload})
+        if step == "move_handoff" and state == "done":
+            task_id = str(payload.get("task", ""))
+            command_id = voice_command_id_for_task(task_id)
+            arrival_text = get_speech(command_id, "arrival") if command_id else ""
+            if arrival_text:
+                self._broadcast(
+                    {
+                        "type": "speech",
+                        "data": {
+                            "text": arrival_text,
+                            "phase": "arrival",
+                            "task": task_id,
+                            "command_id": command_id,
+                        },
+                    }
+                )
         if payload.get("code") == "OBJECT_MISSING":
             from cobot1.motion.grasp_verify import user_feedback_message
 
@@ -930,8 +1037,7 @@ class RosBridge(Node):
                 self.get_logger().error(f"음성 태스크 {task_id} 실패: {exc}")
             finally:
                 if success:
-                    self._apply_phone_task_result(task_id)
-                    self._apply_tray_task_result(task_id)
+                    self._after_task_success(task_id)
                 self._end_run(
                     run_id,
                     success=success,
@@ -1085,8 +1191,7 @@ class RosBridge(Node):
                         failed_task = task_id
                         fail_code = self._task_session.last_result_code
                         break
-                    self._apply_phone_task_result(task_id)
-                    self._apply_tray_task_result(task_id)
+                    self._after_task_success(task_id, user_id=care_user_id)
             except Exception as exc:
                 success = False
                 self.get_logger().error(f"음성 체인 {command.id} 실패: {exc}")
@@ -1237,8 +1342,7 @@ class RosBridge(Node):
                 self.get_logger().error(f"태스크 {task_id} 실패: {exc}")
             finally:
                 if success:
-                    self._apply_phone_task_result(task_id)
-                    self._apply_tray_task_result(task_id)
+                    self._after_task_success(task_id, user_id=user_id)
                 self._end_run(
                     run_id,
                     success=success,
@@ -1432,6 +1536,19 @@ class CareEventRequest(BaseModel):
     detail: dict | None = None
 
 
+class TtsRequest(BaseModel):
+    text: str
+
+
+class MedicationScheduleRequest(BaseModel):
+    user_id: str | None = None
+    enabled: bool = True
+    mode: str = "clock"
+    clock_hour: int = 8
+    clock_minute: int = 0
+    after_meal_minutes: int = 30
+
+
 def create_app():
     try:
         from contextlib import asynccontextmanager
@@ -1485,6 +1602,7 @@ def create_app():
                 "busy": False,
                 "maintenance": False,
                 "robot_namespace": ROBOT_ID,
+                "tts": tts_status(),
             }
         robot_ready = bridge.refresh_robot_ready()
         if bridge._voice_command_id:
@@ -1517,6 +1635,7 @@ def create_app():
             "handoff_action": bridge._handoff_gate.snapshot().get("handoff_action"),
             "handoff_prompt": bridge._handoff_gate.snapshot().get("handoff_prompt"),
             **bridge._safety_decision_gate.snapshot(),
+            "tts": tts_status(),
         }
 
     @app.get("/api/tasks")
@@ -1526,6 +1645,25 @@ def create_app():
     @app.get("/api/voice/catalog")
     def voice_catalog():
         return get_voice_catalog()
+
+    @app.post("/api/tts")
+    async def tts_speak(body: TtsRequest):
+        from starlette.responses import Response
+
+        text = (body.text or "").strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="text가 필요합니다")
+        try:
+            audio = await synthesize_speech_mp3(text)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"TTS 생성 실패: {exc}") from exc
+        return Response(content=audio, media_type="audio/mpeg")
+
+    @app.get("/api/tts/status")
+    def tts_status_endpoint():
+        return tts_status()
 
     @app.post("/api/voice/command")
     def voice_command(body: VoiceCommandRequest):
@@ -1595,6 +1733,47 @@ def create_app():
             raise HTTPException(status_code=404, detail=result.get("message"))
         return result
 
+    @app.get("/api/care/medication-schedules")
+    def care_medication_schedules_list(user_id: str | None = None):
+        bridge = bridge_holder.get("bridge")
+        if bridge is None:
+            raise HTTPException(status_code=503, detail="ROS bridge 초기화 중")
+        return {"schedules": bridge.list_medication_schedules(user_id)}
+
+    @app.post("/api/care/medication-schedules")
+    def care_medication_schedules_create(body: MedicationScheduleRequest):
+        bridge = bridge_holder.get("bridge")
+        if bridge is None:
+            raise HTTPException(status_code=503, detail="ROS bridge 초기화 중")
+        result = bridge.create_medication_schedule(body.model_dump())
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("message", "저장 실패"))
+        return result
+
+    @app.put("/api/care/medication-schedules/{schedule_id}")
+    def care_medication_schedules_update(
+        schedule_id: str,
+        body: MedicationScheduleRequest,
+    ):
+        bridge = bridge_holder.get("bridge")
+        if bridge is None:
+            raise HTTPException(status_code=503, detail="ROS bridge 초기화 중")
+        result = bridge.update_medication_schedule(schedule_id, body.model_dump())
+        if not result.get("success"):
+            code = 404 if result.get("code") == "NOT_FOUND" else 400
+            raise HTTPException(status_code=code, detail=result.get("message", "수정 실패"))
+        return result
+
+    @app.delete("/api/care/medication-schedules/{schedule_id}")
+    def care_medication_schedules_delete(schedule_id: str):
+        bridge = bridge_holder.get("bridge")
+        if bridge is None:
+            raise HTTPException(status_code=503, detail="ROS bridge 초기화 중")
+        result = bridge.delete_medication_schedule(schedule_id)
+        if not result.get("success"):
+            raise HTTPException(status_code=404, detail=result.get("message", "삭제 실패"))
+        return result
+
     @app.post("/api/care/events")
     def care_record_event(body: CareEventRequest):
         bridge = bridge_holder.get("bridge")
@@ -1659,6 +1838,7 @@ def create_app():
         return bridge.force_idle(actor="user")
 
     from cobot1.bridge.admin_routes import register_admin_routes
+    from cobot1.bridge.tts_service import synthesize_speech_mp3, tts_status
 
     register_admin_routes(app, bridge_holder)
 

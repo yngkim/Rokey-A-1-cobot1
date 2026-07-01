@@ -188,6 +188,157 @@ body.admin-mode #root {
   letter-spacing: -0.02em;
 }
 
+.admin-page-title--inline {
+  margin: 0;
+}
+
+.admin-dashboard-top {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) min(800px, 58%);
+  gap: 20px;
+  align-items: stretch;
+  margin-bottom: 24px;
+}
+
+.admin-dashboard-status {
+  min-width: 0;
+  display: flex;
+}
+
+.admin-status-grid {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  min-height: 100%;
+}
+
+.admin-status-grid .admin-card {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 72px;
+}
+
+.admin-card-value--text {
+  font-size: 0.95rem;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.admin-dashboard-camera {
+  min-width: 0;
+}
+
+.admin-camera-monitor {
+  width: 100%;
+  height: 100%;
+  background: #1a2332;
+  border: 1px solid #2d3a4d;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  display: flex;
+  flex-direction: column;
+}
+
+.admin-camera-monitor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #243044;
+  background: #151d28;
+}
+
+.admin-camera-monitor-title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #c5d0de;
+  letter-spacing: 0.02em;
+}
+
+.admin-camera-status {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 3px 8px;
+  border-radius: 999px;
+}
+
+.admin-camera-status--on {
+  background: rgba(34, 197, 94, 0.18);
+  color: #4ade80;
+}
+
+.admin-camera-status--warn {
+  background: rgba(251, 191, 36, 0.18);
+  color: #fbbf24;
+}
+
+.admin-camera-status--danger {
+  background: rgba(248, 113, 113, 0.18);
+  color: #f87171;
+}
+
+.admin-camera-monitor-frame {
+  position: relative;
+  flex: 1;
+  min-height: 420px;
+  aspect-ratio: 16 / 10;
+  background: #0a0e14;
+}
+
+.admin-camera-monitor-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.admin-camera-monitor-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  text-align: center;
+  font-size: 0.85rem;
+  color: #9aa8bc;
+  background: rgba(10, 14, 20, 0.82);
+}
+
+.admin-camera-monitor-overlay--error {
+  color: #fca5a5;
+}
+
+@media (max-width: 1100px) {
+  .admin-dashboard-top {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-status-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-rows: repeat(2, minmax(0, 1fr));
+  }
+
+  .admin-camera-monitor-frame {
+    min-height: 320px;
+    aspect-ratio: 16 / 9;
+  }
+}
+
+@media (max-width: 720px) {
+  .admin-status-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-rows: repeat(3, minmax(0, 1fr));
+  }
+}
+
 .admin-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));

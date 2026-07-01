@@ -19,6 +19,7 @@ from cobot1.motion.exceptions import (
     TaskCancelled,
 )
 from cobot1.motion.gripper import Gripper
+from cobot1.motion.pose_utils import flatten_pose_values
 from cobot1.motion.safety import SafetyGuard
 from cobot1.motion.safety_decision import (
     prepare_resume_after_external_force,
@@ -186,20 +187,34 @@ class RobotMotion:
         self.trans = api["trans"]
         self._get_last_alarm = api["get_last_alarm"]
 
-    def get_current_tcp_pose(self) -> list[float]:
+    def get_current_tcp_pose(self, *, retries: int = 3) -> list[float]:
         """현재 TCP pose [x,y,z,rx,ry,rz] (DR_BASE, mm/deg)."""
         from cobot1.motion.dsr_imports import import_dsr_api
 
         api = import_dsr_api()
-        pos, _sol = api["get_current_posx"](ref=self.DR_BASE)
-        if pos is None or (isinstance(pos, int) and pos in (-1, 0)):
-            raise MotionError(
-                "TCP 위치를 읽을 수 없습니다.",
-                code="POSE_READ_FAILED",
-                user_message="로봇 좌표 조회에 실패했습니다.",
-            )
-        raw = list(pos)[:6]
-        return [float(v) for v in raw]
+        last_detail = "unknown"
+        for attempt in range(max(1, retries)):
+            try:
+                pos, _sol = api["get_current_posx"](ref=self.DR_BASE)
+            except IndexError as exc:
+                last_detail = str(exc)
+                time.sleep(0.12)
+                continue
+            if pos is None or (isinstance(pos, int) and pos in (-1, 0)):
+                last_detail = "service returned empty pose"
+                time.sleep(0.12)
+                continue
+            raw = flatten_pose_values(pos)
+            if len(raw) < 6:
+                last_detail = f"pose length={len(raw)}"
+                time.sleep(0.12)
+                continue
+            return raw[:6]
+        raise MotionError(
+            f"TCP 위치를 읽을 수 없습니다 ({last_detail}).",
+            code="POSE_READ_FAILED",
+            user_message="로봇 좌표 조회에 실패했습니다.",
+        )
 
     def move_tcp_to_z(
         self,
@@ -213,20 +228,29 @@ class RobotMotion:
         pose[2] = float(z_mm)
         self.move_task_pose(pose, label, task, vel=vel, acc=acc)
 
-    def get_current_joint(self) -> list[float]:
+    def get_current_joint(self, *, retries: int = 3) -> list[float]:
         """현재 조인트 각도 [j1..j6] (deg)."""
         from cobot1.motion.dsr_imports import import_dsr_api
 
         api = import_dsr_api()
-        pos = api["get_current_posj"]()
-        if pos is None or (isinstance(pos, int) and pos in (-1, 0)):
-            raise MotionError(
-                "조인트 위치를 읽을 수 없습니다.",
-                code="JOINT_READ_FAILED",
-                user_message="로봇 조인트 조회에 실패했습니다.",
-            )
-        raw = list(pos)[:6]
-        return [float(v) for v in raw]
+        last_detail = "unknown"
+        for _attempt in range(max(1, retries)):
+            pos = api["get_current_posj"]()
+            if pos is None or (isinstance(pos, int) and pos in (-1, 0)):
+                last_detail = "service returned empty joint"
+                time.sleep(0.12)
+                continue
+            raw = flatten_pose_values(pos, min_length=6)
+            if len(raw) < 6:
+                last_detail = f"joint length={len(raw)}"
+                time.sleep(0.12)
+                continue
+            return raw[:6]
+        raise MotionError(
+            f"조인트 위치를 읽을 수 없습니다 ({last_detail}).",
+            code="JOINT_READ_FAILED",
+            user_message="로봇 조인트 조회에 실패했습니다.",
+        )
 
     def move_base_x_delta(
         self,
@@ -237,9 +261,13 @@ class RobotMotion:
         acc: Sequence[float] | None = None,
     ) -> None:
         """베이스 좌표계 X만 이동 (수평, Y·Z·자세 유지)."""
-        pose = self.get_current_tcp_pose()
-        pose[0] += float(dx_mm)
-        self.move_task_pose(pose, label, task, vel=vel, acc=acc)
+        self.move_relative_base(
+            [float(dx_mm), 0.0, 0.0, 0.0, 0.0, 0.0],
+            label,
+            task,
+            vel=vel,
+            acc=acc,
+        )
 
     def move_base_z_delta(
         self,
@@ -250,9 +278,13 @@ class RobotMotion:
         acc: Sequence[float] | None = None,
     ) -> None:
         """베이스 좌표계 Z만 이동 (수직 하강/상승, 자세 유지)."""
-        pose = self.get_current_tcp_pose()
-        pose[2] += float(dz_mm)
-        self.move_task_pose(pose, label, task, vel=vel, acc=acc)
+        self.move_relative_base(
+            [0.0, 0.0, float(dz_mm), 0.0, 0.0, 0.0],
+            label,
+            task,
+            vel=vel,
+            acc=acc,
+        )
 
     def retreat_base_z(
         self,
@@ -384,8 +416,10 @@ class RobotMotion:
             )
 
         def _finish(travelled: float, reason: str) -> tuple[float, float]:
-            self._safety.request_move_stop()
-            time.sleep(0.08)
+            # 접촉은 스텝 movel 완료 후 판정되므로 move_stop 은 불필요하며,
+            # 호출 시 다음 movel 이 즉시 반환만 하고 실제 Z 이동이 안 일어날 수 있다.
+            self.mwait(0)
+            time.sleep(0.05)
             touch_fz = _fz_delta()
             # 순응 모드에서 명령 위치(commanded_Z)는 실제 cap 표면보다 아래일 수 있다.
             # 실제 TCP 위치를 읽어야 올바른 파지 Z를 계산할 수 있다.
@@ -588,7 +622,13 @@ class RobotMotion:
             opts.get("descend_acc", self._cfg.get("home_descend_acc", [30, 20]))
         )
 
-        tcp = [float(v) for v in import_dsr_api()["fkin"](list(joints))]
+        tcp = flatten_pose_values(import_dsr_api()["fkin"](list(joints)))
+        if len(tcp) < 6:
+            raise MotionError(
+                "목표 조인트의 TCP 변환에 실패했습니다.",
+                code="FKIN_FAILED",
+                user_message="로봇 좌표 계산에 실패했습니다.",
+            )
         cur = self.get_current_tcp_pose()
         travel_z = max(cur[2], tcp[2]) + lift_mm
 
@@ -647,6 +687,31 @@ class RobotMotion:
 
         def _move():
             self.movel(target, vel=v, acc=a, ref=self.DR_BASE)
+
+        self._run_with_retry(label, _move)
+        self.publish_status(task, label, "done")
+
+    def move_relative_base(
+        self,
+        delta: Sequence[float],
+        label: str,
+        task: str,
+        vel: Sequence[float] | None = None,
+        acc: Sequence[float] | None = None,
+    ) -> None:
+        """베이스 좌표계 상대 직선 이동 (손목 자세와 무관하게 베이스 축 이동)."""
+        self.publish_status(task, label, "running")
+        v = vel or self._cfg["task_vel"]
+        a = acc or self._cfg["task_acc"]
+
+        def _move():
+            self.movel(
+                list(delta),
+                vel=v,
+                acc=a,
+                ref=self.DR_BASE,
+                mod=self.DR_MV_MOD_REL,
+            )
 
         self._run_with_retry(label, _move)
         self.publish_status(task, label, "done")

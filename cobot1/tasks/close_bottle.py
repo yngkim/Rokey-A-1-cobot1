@@ -6,15 +6,15 @@
   (바닥 파지 위치는 open_bottle 이 저장한 TCP 포즈를 우선 사용)
 
 흐름:
-  home → 바닥 뚜껑 집기 → Z↑ → Y → X → Z↓ 조임 위치
-  → 살살 놓기 → Z↑ → 빈 그리퍼 닫기 → 뚜껑 중앙 누르기(ΔFz 40N)
-  → 그리퍼 열기 → 재하강·재파지 → J6 가드 조임 → 물병 이송 → home
+  home → 바닥 뚜껑 접근·하강 → 그리퍼로 파지 → Z↑ 들어올림
+  → 조임 위치(Z↑→XY→Z↓) → 살살 놓기 → 사전 정렬·조임 → 물병 이송 → home
 
 티칭: water_poses.cupholder_cap_close_start(조임 직전), water_cap_grasp(초기 물통).
 """
 
 from __future__ import annotations
 
+from cobot1.motion.exceptions import MotionError
 from cobot1.motion.pose_utils import offset_pose_z
 from cobot1.runtime_state import load_cap_place_pose
 from cobot1.tasks.base import BaseTask
@@ -44,7 +44,6 @@ class CloseBottleTask(BaseTask):
         cap_grasp_extra = float(wp.get("cap_grasp_extra_descent_mm", 0.0))
         pos_water_cap = offset_pose_z(wp["water_cap_grasp"], bottle_dz)
         pos_cupholder_cap = offset_pose_z(wp["cupholder_cap_grasp"], bottle_dz)
-        screw_start_offset_x = float(cfg.get("screw_start_offset_x_mm", -3.0))
         screw_start_offset_y = float(cfg.get("screw_start_offset_y_mm", 3.0))
         lift = float(wp.get("lift_clearance_mm", 120.0))
 
@@ -79,6 +78,7 @@ class CloseBottleTask(BaseTask):
         press_vel = list(cfg.get("cap_press_vel", [3, 2]))
         press_acc = list(cfg.get("cap_press_acc", [6, 4]))
         press_max_travel = float(cfg.get("cap_press_max_travel_mm", 40.0))
+        pre_open_lift = float(cfg.get("cap_press_pre_open_lift_mm", 10.0))
         cap_screw_grasp_force = float(cfg.get("cap_screw_grasp_force", 400.0))
         cap_screw_grasp_wait = float(cfg.get("cap_screw_grasp_wait_sec", 2.0))
         screw_j6_abs_limit = float(cfg.get("screw_j6_abs_limit_deg", 170.0))
@@ -99,7 +99,6 @@ class CloseBottleTask(BaseTask):
             bottle_dz - cap_grasp_extra,
         )
         screw_target = list(pos_screw_close)
-        screw_target[0] += screw_start_offset_x
         screw_target[1] += screw_start_offset_y
 
         saved_place = load_cap_place_pose()
@@ -135,27 +134,38 @@ class CloseBottleTask(BaseTask):
             motion.gripper.open()
 
         def _approach_floor_cap() -> None:
-            cur = motion.get_current_tcp_pose()
-            travel_z = max(cur[2], cap_floor_pick[2]) + lift
-            above = [
-                cap_floor_pick[0], cap_floor_pick[1], travel_z,
-                cap_floor_pick[3], cap_floor_pick[4], cap_floor_pick[5],
-            ]
-            motion.move_task_pose(above, "approach_floor_cap", task,
-                                  vel=fast_vel, acc=fast_acc)
+            """바닥 뚜껑 파지 포즈 위에서 수직 접근 후 하강 (open_bottle 파지와 동일 패턴)."""
+            motion.approach_from_above(
+                cap_floor_pick, "approach_floor_cap", task, lift,
+                vel=fast_vel, acc=fast_acc,
+                descend_vel=grasp_vel, descend_acc=grasp_acc,
+            )
 
-        def _descend_to_floor_cap() -> None:
-            motion.move_task_pose(cap_floor_pick, "descend_to_floor_cap", task,
-                                  vel=grasp_vel, acc=grasp_acc)
-
-        def _grasp_cap_gently() -> None:
-            motion.gripper.grip_and_verify("bottle_cap", force=grip_force)
+        def _grasp_floor_cap() -> None:
+            """바닥에 놓인 뚜껑을 약파지 후 파지 확인."""
+            motion.publish_status(
+                task, "grasp_cap", "running",
+                f"바닥 뚜껑 파지 (force={grip_force:.0f}N)",
+            )
+            motion.gripper.grip_and_verify(
+                "bottle_cap",
+                force=grip_force,
+                wait_sec=grasp_settle,
+            )
+            motion.publish_status(task, "grasp_cap", "done", "바닥 뚜껑 파지 완료")
 
         def _grasp_settle() -> None:
             motion.publish_status(task, "grasp_settle", "running",
-                                  f"파지 완료 대기 {grasp_settle:.1f}초")
+                                  f"파지 안정 대기 {grasp_settle:.1f}초")
             motion.interruptible_sleep(grasp_settle)
             motion.publish_status(task, "grasp_settle", "done")
+
+        def _lift_cap_off_floor() -> None:
+            """바닥 뚜껑을 든 채 베이스 Z로 수직 상승."""
+            motion.move_base_z_delta(
+                lift, "lift_cap_off_floor", task,
+                vel=fast_vel, acc=fast_acc,
+            )
 
         def _carry_cap_to_screw() -> None:
             cur = motion.get_current_tcp_pose()
@@ -165,14 +175,9 @@ class CloseBottleTask(BaseTask):
                 vel=fast_vel, acc=fast_acc,
             )
             motion.move_task_pose(
-                [cur[0], screw_target[1], travel_z, cur[3], cur[4], cur[5]],
-                "screw_travel_y", task,
-                vel=fast_vel, acc=fast_acc,
-            )
-            motion.move_task_pose(
                 [screw_target[0], screw_target[1], travel_z,
                  cur[3], cur[4], cur[5]],
-                "screw_travel_x", task,
+                "screw_travel_y", task,
                 vel=fast_vel, acc=fast_acc,
             )
             motion.move_task_pose(
@@ -197,7 +202,12 @@ class CloseBottleTask(BaseTask):
             motion.gripper.close()
 
         def _press_cap_center() -> None:
-            """빈 그리퍼로 뚜껑 중앙을 천천히 눌러 정렬 (ΔFz 35N에서 정지)."""
+            """빈 그리퍼로 뚜껑 중앙을 눌러 정렬 후, 접촉 감지 → Z↑ → 열기 → 조임 Z 재하강.
+
+            probe 직후 finally 에서 안전 감시를 켜면 접촉 외력 때문에 다음 step 전에
+            중단·그리퍼 open 이 먼저 일어날 수 있으므로, 상승·열기·재하강까지
+            contact_search(외력 중단 해제) 구간 안에서 연속 수행한다.
+            """
             press_anchor = list(screw_target)
             press_anchor[2] = screw_target[2] + press_approach_z
             motion.move_task_pose(
@@ -207,7 +217,7 @@ class CloseBottleTask(BaseTask):
             motion.pause_safety_force_abort()
             try:
                 baseline = motion.safety.sample_force_baseline()
-                motion.probe_down_until_contact(
+                touch_z, touch_fz = motion.probe_down_until_contact(
                     task,
                     press_anchor,
                     baseline,
@@ -222,17 +232,57 @@ class CloseBottleTask(BaseTask):
                     fine_vel=press_vel,
                     fine_acc=press_acc,
                 )
+                motion.interruptible_sleep(0.2)
+                before_z = motion.get_current_tcp_pose()[2]
+                min_lift = min(3.0, pre_open_lift * 0.5)
+                lifted_z = before_z
+                for attempt in range(4):
+                    if attempt > 0:
+                        motion.interruptible_sleep(0.25)
+                    step_label = (
+                        "lift_before_open"
+                        if attempt == 0
+                        else f"lift_before_open_r{attempt}"
+                    )
+                    motion.publish_status(
+                        task, step_label, "running",
+                        f"Z +{pre_open_lift:.1f}mm "
+                        f"(접촉 Z={touch_z:.1f}, ΔFz={touch_fz:.1f}, "
+                        f"시도 {attempt + 1}/4)",
+                    )
+                    motion.move_relative_base(
+                        [0.0, 0.0, pre_open_lift, 0.0, 0.0, 0.0],
+                        step_label, task,
+                        vel=grasp_vel, acc=grasp_acc,
+                    )
+                    motion.interruptible_sleep(0.05)
+                    lifted_z = motion.get_current_tcp_pose()[2]
+                    if lifted_z >= before_z + min_lift:
+                        break
+                    motion._node.get_logger().warn(
+                        f"[{task}] {step_label}: Z 상승 부족 "
+                        f"(before={before_z:.1f}, after={lifted_z:.1f}), 재시도"
+                    )
+                else:
+                    raise MotionError(
+                        f"lift_before_open: Z 상승 실패 "
+                        f"(before={before_z:.1f}, after={lifted_z:.1f})",
+                        code="LIFT_INSUFFICIENT",
+                        user_message="접촉 후 상승에 실패했습니다.",
+                    )
+                motion.publish_status(
+                    task, "lift_before_open", "done",
+                    f"Z={lifted_z:.1f}mm (+{lifted_z - before_z:.1f}mm)",
+                )
+                motion.gripper.open()
+                cur2 = motion.get_current_tcp_pose()
+                motion.move_vertical_to_z(
+                    screw_target[2], cur2, "descend_for_screw", task,
+                    vel=grasp_vel, acc=grasp_acc,
+                )
             finally:
+                motion.safety.clear_external_force_violation()
                 motion.resume_safety_force_abort()
-
-        def _open_for_regrasp() -> None:
-            motion.gripper.open()
-
-        def _descend_for_screw() -> None:
-            motion.move_task_pose(
-                screw_target, "descend_for_screw", task,
-                vel=grasp_vel, acc=grasp_acc,
-            )
 
         def _regrasp_for_screw() -> None:
             motion.gripper.grip_and_verify(
@@ -312,16 +362,14 @@ class CloseBottleTask(BaseTask):
         steps = [
             ("prepare_home",            _prepare_home),
             ("approach_floor_cap",      _approach_floor_cap),
-            ("descend_to_floor_cap",    _descend_to_floor_cap),
-            ("grasp_cap",               _grasp_cap_gently),
+            ("grasp_cap",               _grasp_floor_cap),
             ("grasp_settle",            _grasp_settle),
+            ("lift_cap_off_floor",      _lift_cap_off_floor),
             ("carry_cap_to_screw",      _carry_cap_to_screw),
             ("soft_release_cap",        _soft_release_cap),
             ("preseat_lift",            _preseat_lift),
             ("close_empty_gripper",     _close_empty_gripper),
             ("press_cap_center",        _press_cap_center),
-            ("open_for_regrasp",        _open_for_regrasp),
-            ("descend_for_screw",       _descend_for_screw),
             ("regrasp_for_screw",       _regrasp_for_screw),
             ("screw_close",             _screw_close),
             ("screw_close_extra",       _screw_close_extra),

@@ -3,13 +3,20 @@ export function VoiceButton({
   disabled,
   isListening,
   isProcessing,
+  isAmbient = false,
   interimText,
   onPress,
+  compact = false,
 }) {
   const active = isListening || isProcessing
 
   return (
-    <div className="voice-panel">
+    <div className={`voice-panel ${compact ? 'voice-panel-compact' : ''}`}>
+      {isAmbient && !active && (
+        <p className="voice-ambient-badge" aria-live="polite">
+          🎧 듣는 중 — 「돌봄아」라고 불러 주세요
+        </p>
+      )}
       <button
         type="button"
         className={`voice-btn ${active ? 'voice-btn-active' : ''}`}
@@ -28,7 +35,7 @@ export function VoiceButton({
 
       {isListening && (
         <p className="voice-hint">
-          「약 준비해 줘」라고 말씀해 주세요
+          명령을 말씀해 주세요
           {interimText ? (
             <span className="voice-interim"> — {interimText}</span>
           ) : null}

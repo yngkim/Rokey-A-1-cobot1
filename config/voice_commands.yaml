@@ -1,4 +1,11 @@
 # 음성 명령 고정 문장 (프로토타입: 완전 일치만)
+
+wake_word:
+  phrases:
+    - "돌봄아"
+    - "돌봄 아"
+  response: "네. 말씀하세요."
+
 commands:
   - id: prepare_medication
     phrase: "약 준비해 줘"
@@ -57,15 +64,19 @@ speech:
     complete: "약 준비가 끝났어요."
   pick_phone:
     ack: "네, 핸드폰 가져다 드릴게요."
+    arrival: "핸드폰 가져다 왔어요. 받아 주세요."
     complete: "핸드폰 가져왔어요."
   place_phone:
     ack: "네, 핸드폰 거치대에 갖다 놓을게요."
+    arrival: "핸드폰 올려 주세요. 기다리고 있을게요."
     complete: "핸드폰을 거치대에 놓았어요."
   serve_meal:
     ack: "네, 식사 가져다 드릴게요."
+    arrival: "식사 가져다 왔어요. 받아 주세요."
     complete: "식사 가져다 드렸어요."
   return_tray:
     ack: "네, 식사 가져갈게요."
+    arrival: "트레이 회수하러 왔어요."
     complete: "식사 가져갔어요."
   stop:
     ack: "네, 멈추겠습니다."

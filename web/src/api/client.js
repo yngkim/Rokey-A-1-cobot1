@@ -145,6 +145,45 @@ export async function fetchActiveCareUser() {
   return res.json()
 }
 
+export async function fetchMedicationSchedules(userId = null) {
+  const q = userId ? `?user_id=${encodeURIComponent(userId)}` : ''
+  const res = await fetch(`${API_BASE}/api/care/medication-schedules${q}`)
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.detail || data.message || '약 시간 목록을 불러오지 못했습니다')
+  return data
+}
+
+export async function createMedicationSchedule(schedule) {
+  const res = await fetch(`${API_BASE}/api/care/medication-schedules`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(schedule),
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.detail || data.message || '약 시간 저장 실패')
+  return data
+}
+
+export async function updateMedicationSchedule(scheduleId, schedule) {
+  const res = await fetch(`${API_BASE}/api/care/medication-schedules/${encodeURIComponent(scheduleId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(schedule),
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.detail || data.message || '약 시간 수정 실패')
+  return data
+}
+
+export async function deleteMedicationSchedule(scheduleId) {
+  const res = await fetch(`${API_BASE}/api/care/medication-schedules/${encodeURIComponent(scheduleId)}`, {
+    method: 'DELETE',
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.detail || data.message || '약 시간 삭제 실패')
+  return data
+}
+
 export async function setActiveCareUser(userId) {
   const res = await fetch(`${API_BASE}/api/care/active-user`, {
     method: 'POST',

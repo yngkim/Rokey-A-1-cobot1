@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, Route, Routes } from 'react-router-dom'
 import {
   fetchActiveCareUser,
   fetchCareUsers,
   fetchVoiceCatalog,
   forceIdle,
-  getTaskVoiceHint,
   recordCareEvent,
   runTask,
   speechCommandIdForTask,
@@ -13,42 +12,20 @@ import {
   setActiveCareUser,
   taskVoiceHintsFromCatalog,
 } from './api/client'
+import CareMenuButton from './components/CareMenuButton'
+import DeviceLayoutToggle from './components/DeviceLayoutToggle'
 import SafetyAlertModal from './components/SafetyAlertModal'
 import RunningDock from './components/RunningDock'
+import TabletTaskGrid from './components/TabletTaskGrid'
+import TaskButton from './components/TaskButton'
 import VoiceButton from './components/VoiceButton'
+import { useDeviceLayout } from './hooks/useDeviceLayout'
 import { useRobotApp } from './hooks/useRobotApp'
 import { useRobotSpeech } from './hooks/useRobotSpeech'
 import { useVoiceInput } from './hooks/useVoiceInput'
-
-function TaskButton({ task, disabled, hint, voicePhrase, onRun }) {
-  const [loading, setLoading] = useState(false)
-
-  const handleClick = async () => {
-    if (disabled || loading) return
-    setLoading(true)
-    try {
-      await onRun(task.id)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  return (
-    <button
-      className={`task-btn ${task.id === 'go_home' ? 'task-btn-control' : ''} ${loading ? 'loading' : ''} ${disabled ? 'disabled' : ''}`}
-      onClick={handleClick}
-      disabled={disabled || loading}
-      title={hint}
-    >
-      <span className="task-icon">{task.icon}</span>
-      <span className="task-label">{task.label}</span>
-      {voicePhrase && (
-        <span className="task-voice-hint">「{voicePhrase}」</span>
-      )}
-      {loading && <span className="task-spinner" />}
-    </button>
-  )
-}
+import { useWakeWordListener } from './hooks/useWakeWordListener'
+import MedicationSchedulePage from './pages/MedicationSchedulePage'
+import { primeAudioSession } from './speech/audioPrime'
 
 function phoneTaskHint(taskId, phoneLocation) {
   if (taskId === 'pick_from_charger' && phoneLocation === 'with_user') {
@@ -76,15 +53,45 @@ function connectionLabel(apiOnline, robotReady) {
   return { text: '연결됨', className: 'on' }
 }
 
+function InfoBanners({ apiOnline, maintenance, robotReady }) {
+  if (!apiOnline) {
+    return (
+      <div className="info-banner">
+        웹 API 서버가 꺼져 있습니다.
+        <code>ros2 run cobot1 care_web_api</code>
+      </div>
+    )
+  }
+  if (maintenance) {
+    return (
+      <div className="info-banner warn">
+        점검 중입니다. 잠시 후 다시 이용해 주세요.
+      </div>
+    )
+  }
+  if (!robotReady) {
+    return (
+      <div className="info-banner warn">
+        로봇 bringup을 실행하고 팬던트에서 SERVO ON 하세요.
+      </div>
+    )
+  }
+  return null
+}
+
 export default function CareApp() {
   const speech = useRobotSpeech()
   const speechRef = useRef(speech)
   speechRef.current = speech
 
+  const { layout, setLayout, isTablet } = useDeviceLayout()
+
   const [careUsers, setCareUsers] = useState([])
   const [activeUserId, setActiveUserId] = useState('')
   const [activeUserName, setActiveUserName] = useState('')
   const [taskVoiceHints, setTaskVoiceHints] = useState({})
+  const [wakeWordConfig, setWakeWordConfig] = useState(null)
+  const startListeningRef = useRef(null)
 
   const {
     tasks,
@@ -129,9 +136,20 @@ export default function CareApp() {
 
   useEffect(() => {
     fetchVoiceCatalog()
-      .then((data) => setTaskVoiceHints(taskVoiceHintsFromCatalog(data)))
+      .then((data) => {
+        setTaskVoiceHints(taskVoiceHintsFromCatalog(data))
+        if (data?.wake_word) {
+          setWakeWordConfig(data.wake_word)
+        }
+      })
       .catch(() => {})
   }, [])
+
+  useEffect(() => {
+    if (apiOnline && robotReady && !maintenance) {
+      primeAudioSession().catch(() => {})
+    }
+  }, [apiOnline, robotReady, maintenance])
 
   const handleUserChange = async (userId) => {
     try {
@@ -216,18 +234,52 @@ export default function CareApp() {
     [showToast],
   )
 
+  const wakePhrases = wakeWordConfig?.phrases || ['돌봄아', '돌봄 아']
+
   const voice = useVoiceInput({
     enabled: apiOnline && robotReady && !maintenance,
     busy,
     isSpeaking: speech.isSpeaking,
+    wakePhrases,
     onResult: handleVoiceResult,
     onError: handleVoiceError,
   })
 
+  startListeningRef.current = voice.startListening
+
+  const handleWake = useCallback(
+    async (response) => {
+      await speech.speakText(response)
+      await startListeningRef.current?.()
+    },
+    [speech],
+  )
+
+  const wakeListener = useWakeWordListener({
+    enabled: apiOnline && robotReady && !maintenance,
+    busy,
+    maintenance,
+    speaking: speech.speaking,
+    commandActive: voice.isListening || voice.isProcessing,
+    wakeConfig: wakeWordConfig,
+    onWake: handleWake,
+    onError: handleVoiceError,
+  })
+
+  const handleVoicePress = useCallback(async () => {
+    wakeListener.stopAmbient()
+    await voice.startListening()
+  }, [voice, wakeListener])
+
   const conn = connectionLabel(apiOnline, robotReady)
   const canRun = apiOnline && robotReady && !busy && !maintenance
   const voiceDisabled =
-    !apiOnline || !robotReady || busy || maintenance || voice.isProcessing || speech.isSpeaking()
+    !apiOnline
+    || !robotReady
+    || busy
+    || maintenance
+    || voice.isProcessing
+    || speech.speaking
 
   const disabledHint = maintenance
     ? '유지보수 모드 중입니다'
@@ -248,6 +300,7 @@ export default function CareApp() {
         } else {
           markTaskStarted(taskId)
         }
+        await primeAudioSession()
         await speech.speakAck(speechCommandIdForTask(taskId))
         showToast(result.message || '작업을 시작했습니다')
         refreshHealth()
@@ -282,19 +335,29 @@ export default function CareApp() {
 
   const groups = [...new Set(tasks.map((t) => t.group))]
 
+  const shellClass = [
+    'care-shell',
+    isTablet ? 'layout-tablet' : 'layout-phone',
+    busy ? 'is-busy' : '',
+  ]
+    .filter(Boolean)
+    .join(' ')
+
   return (
-    <div className={`phone-shell ${busy ? 'is-busy' : ''}`}>
-      <div className="phone-notch" />
-      <header className="app-header">
-        <div>
+    <div className={shellClass}>
+      {!isTablet && <div className="phone-notch" />}
+
+      <header className={`app-header ${isTablet ? 'app-header-tablet' : ''}`}>
+        <div className="app-header-title">
           <h1>침상 케어 로봇</h1>
           <p className="subtitle">M0609 원격 제어</p>
         </div>
+        <DeviceLayoutToggle layout={layout} onChange={setLayout} />
         <div className={`conn-badge ${conn.className}`}>{conn.text}</div>
       </header>
 
       {apiOnline && careUsers.length > 0 && (
-        <div className="care-user-bar">
+        <div className={`care-user-bar ${isTablet ? 'care-user-bar-tablet' : ''}`}>
           <label htmlFor="care-user-select">사용자</label>
           <select
             id="care-user-select"
@@ -312,24 +375,11 @@ export default function CareApp() {
         </div>
       )}
 
-      {!apiOnline && (
-        <div className="info-banner">
-          웹 API 서버가 꺼져 있습니다.
-          <code>ros2 run cobot1 care_web_api</code>
-        </div>
-      )}
-
-      {apiOnline && maintenance && (
-        <div className="info-banner warn">
-          점검 중입니다. 잠시 후 다시 이용해 주세요.
-        </div>
-      )}
-
-      {apiOnline && !robotReady && !maintenance && (
-        <div className="info-banner warn">
-          로봇 bringup을 실행하고 팬던트에서 SERVO ON 하세요.
-        </div>
-      )}
+      <InfoBanners
+        apiOnline={apiOnline}
+        maintenance={maintenance}
+        robotReady={robotReady}
+      />
 
       {alert && (
         <SafetyAlertModal
@@ -343,75 +393,128 @@ export default function CareApp() {
         />
       )}
 
-      <VoiceButton
-        supported={voice.supported}
-        disabled={voiceDisabled}
-        isListening={voice.isListening}
-        isProcessing={voice.isProcessing}
-        interimText={voice.interimText}
-        onPress={voice.startListening}
-      />
-
-      <main className={`app-main ${busy ? 'dimmed' : ''}`}>
-        {groups.map((group) => (
-          <section key={group} className="task-section">
-            <h2>{group}</h2>
-            <div className="task-grid">
-              {tasks
-                .filter((t) => t.group === group)
-                .map((task) => {
-                  const phoneHint = phoneTaskHint(task.id, phoneLocation)
-                  const trayHint = trayTaskHint(task.id, trayLocation)
-                  const taskHint = phoneHint || trayHint
-                  return (
-                  <TaskButton
-                    key={task.id}
-                    task={task}
-                    disabled={!canRun || !!taskHint}
-                    hint={taskHint || disabledHint}
-                    voicePhrase={getTaskVoiceHint(task.id, taskVoiceHints)}
-                    onRun={handleRun}
+      <Routes>
+        <Route
+          index
+          element={
+            <>
+              {isTablet ? (
+                <div className="tablet-toolbar">
+                  <VoiceButton
+                    compact
+                    supported={voice.supported}
+                    disabled={voiceDisabled}
+                    isListening={voice.isListening}
+                    isProcessing={voice.isProcessing}
+                    isAmbient={wakeListener.isAmbient}
+                    interimText={voice.interimText}
+                    onPress={handleVoicePress}
                   />
-                  )
-                })}
-            </div>
-          </section>
-        ))}
+                  <Link to="/medication-schedule" className="tablet-menu-link">
+                    ⏰ 약 복용 시간
+                  </Link>
+                </div>
+              ) : (
+                <VoiceButton
+                  supported={voice.supported}
+                  disabled={voiceDisabled}
+                  isListening={voice.isListening}
+                  isProcessing={voice.isProcessing}
+                  isAmbient={wakeListener.isAmbient}
+                  interimText={voice.interimText}
+                  onPress={handleVoicePress}
+                />
+              )}
 
-        <section className="task-section">
-          <h2>복약 기록</h2>
-          <div className="task-grid">
-            <button
-              type="button"
-              className="task-btn"
-              disabled={!canRun || !activeUserId}
-              onClick={() => handleCareLog('medication_taken', '복용 완료')}
-              title={disabledHint || '복용 완료 기록'}
-            >
-              <span className="task-icon">✅</span>
-              <span className="task-label">복용 완료</span>
-            </button>
-          </div>
-        </section>
+              <main className={`app-main ${busy ? 'dimmed' : ''} ${isTablet ? 'app-main-tablet' : ''}`}>
+                {isTablet ? (
+                  <TabletTaskGrid
+                    tasks={tasks}
+                    canRun={canRun}
+                    disabledHint={disabledHint}
+                    phoneLocation={phoneLocation}
+                    trayLocation={trayLocation}
+                    taskVoiceHints={taskVoiceHints}
+                    activeUserId={activeUserId}
+                    onRun={handleRun}
+                    onCareLog={handleCareLog}
+                  />
+                ) : (
+                  <>
+                    {groups.map((group) => (
+                      <section key={group} className="task-section">
+                        <h2>{group}</h2>
+                        <div className="task-grid">
+                          {tasks
+                            .filter((t) => t.group === group)
+                            .map((task) => {
+                              const phoneHint = phoneTaskHint(task.id, phoneLocation)
+                              const trayHint = trayTaskHint(task.id, trayLocation)
+                              const taskHint = phoneHint || trayHint
+                              return (
+                                <TaskButton
+                                  key={task.id}
+                                  task={task}
+                                  disabled={!canRun || !!taskHint}
+                                  hint={taskHint || disabledHint}
+                                  voiceHints={taskVoiceHints}
+                                  onRun={handleRun}
+                                />
+                              )
+                            })}
+                        </div>
+                      </section>
+                    ))}
 
-        <section className="task-section">
-          <h2>복구</h2>
-          <div className="task-grid">
-            <button
-              className={`task-btn task-btn-reset ${resetting ? 'loading' : ''}`}
-              onClick={handleReset}
-              disabled={resetting}
-              title="SAFE_STOP 해제 후 홈 위치로 복귀합니다"
-            >
-              <span className="task-icon">🔄</span>
-              <span className="task-label">초기화 / 홈 복귀</span>
-              {resetting && <span className="task-spinner" />}
-            </button>
-          </div>
-        </section>
-      </main>
+                    <section className="task-section">
+                      <h2>기능</h2>
+                      <div className="task-grid">
+                        <CareMenuButton
+                          to="/medication-schedule"
+                          icon="⏰"
+                          label="약 복용 시간"
+                          hint="자동 약 준비 설정"
+                          disabled={!apiOnline || !activeUserId}
+                        />
+                      </div>
+                    </section>
 
-      <footer className="status-bar">
+                    <section className="task-section">
+                      <h2>복약 기록</h2>
+                      <div className="task-grid">
+                        <button
+                          type="button"
+                          className="task-btn"
+                          disabled={!canRun || !activeUserId}
+                          onClick={() => handleCareLog('medication_taken', '복용 완료')}
+                          title={disabledHint || '복용 완료 기록'}
+                        >
+                          <span className="task-icon">✅</span>
+                          <span className="task-label">복용 완료</span>
+                        </button>
+                      </div>
+                    </section>
+                  </>
+                )}
+              </main>
+            </>
+          }
+        />
+        <Route
+          path="medication-schedule"
+          element={
+            <MedicationSchedulePage
+              userId={activeUserId}
+              userName={activeUserName}
+              busy={busy}
+              isTablet={isTablet}
+              onToast={showToast}
+            />
+          }
+        />
+      </Routes>
+
+      <footer className={`status-bar ${isTablet ? 'status-bar-tablet' : ''}`}>
         {!busy && <span>버튼 또는 음성으로 기능을 실행하세요</span>}
         {busy && (
           <>
@@ -437,6 +540,7 @@ export default function CareApp() {
         onHandoffConfirm={handleHandoffConfirm}
         onStop={handleStop}
         stopping={stopping}
+        layout={isTablet ? 'tablet' : 'phone'}
       />
 
       {toast && (

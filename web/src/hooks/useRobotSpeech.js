@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { fetchVoiceCatalog } from '../api/client'
-import { cancelSpeech, isSpeaking, speak } from '../speech/ttsEngine'
+import { primeAudioSession } from '../speech/audioPrime'
+import { cancelSpeech, isSpeaking as checkSpeaking, speak } from '../speech/ttsEngine'
 
 const DEFAULT_SPEECH = {
   prepare_medication: {
@@ -12,10 +13,12 @@ const DEFAULT_SPEECH = {
   },
   pick_phone: {
     ack: '네, 핸드폰 가져다 드릴게요.',
+    arrival: '핸드폰 가져다 왔어요. 받아 주세요.',
     complete: '핸드폰 가져왔어요.',
   },
   place_phone: {
     ack: '네, 핸드폰 거치대에 갖다 놓을게요.',
+    arrival: '핸드폰 올려 주세요. 기다리고 있을게요.',
     complete: '핸드폰을 거치대에 놓았어요.',
   },
   clean_floor: {
@@ -24,10 +27,12 @@ const DEFAULT_SPEECH = {
   },
   serve_meal: {
     ack: '네, 식사 가져다 드릴게요.',
+    arrival: '식사 가져다 왔어요. 받아 주세요.',
     complete: '식사 가져다 드렸어요.',
   },
   return_tray: {
     ack: '네, 식사 가져갈게요.',
+    arrival: '트레이 회수하러 왔어요.',
     complete: '식사 가져갔어요.',
   },
   global: {
@@ -41,6 +46,7 @@ const DEFAULT_SPEECH = {
 
 export function useRobotSpeech() {
   const [speechCatalog, setSpeechCatalog] = useState(DEFAULT_SPEECH)
+  const [speaking, setSpeaking] = useState(false)
   const catalogRef = useRef(DEFAULT_SPEECH)
 
   useEffect(() => {
@@ -64,7 +70,13 @@ export function useRobotSpeech() {
 
   const speakText = useCallback(async (text) => {
     if (!text) return
-    await speak(text)
+    await primeAudioSession()
+    setSpeaking(true)
+    try {
+      await speak(text)
+    } finally {
+      setSpeaking(false)
+    }
   }, [])
 
   const speakAck = useCallback(
@@ -99,7 +111,8 @@ export function useRobotSpeech() {
 
   return {
     speechCatalog,
-    isSpeaking,
+    speaking,
+    isSpeaking: checkSpeaking,
     cancelSpeech,
     speakAck,
     speakComplete,

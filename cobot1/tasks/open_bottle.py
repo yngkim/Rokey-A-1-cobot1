@@ -80,7 +80,11 @@ class OpenBottleTask(BaseTask):
 
         # 뚜껑 놓을 위치: home_joint TCP 기준 X+0/Y-100 (바닥)
         from cobot1.motion.dsr_imports import import_dsr_api
-        home_tcp = [float(v) for v in import_dsr_api()["fkin"](home_joint)]
+        from cobot1.motion.pose_utils import flatten_pose_values
+
+        home_tcp = flatten_pose_values(import_dsr_api()["fkin"](home_joint))
+        if len(home_tcp) < 2:
+            raise RuntimeError("home_joint fkin failed — cannot compute place_y")
         place_y = home_tcp[1] - 100.0
 
         def _release_compliance() -> None:
@@ -153,7 +157,6 @@ class OpenBottleTask(BaseTask):
         #     motion.move_relative_tool([0, 0, grasp_descent, 0, 0, 0], ...)
 
         def _twist_open() -> None:
-            # 개봉은 섬세 작업 → 느린 속도
             motion.rotate_tool_z_steps(
                 twist_angle,
                 int(cfg["twist_steps"]),

@@ -2,7 +2,27 @@
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Any, Sequence
+
+
+def flatten_pose_values(values: Any, *, min_length: int = 6) -> list[float]:
+    """DSR API 반환값(posx, numpy, 중첩 list 등)을 float 리스트로 평탄화."""
+    if values is None:
+        return []
+    if isinstance(values, (int, float)):
+        return [float(values)]
+
+    flat: list[float] = []
+    queue: list[Any] = [values.tolist() if hasattr(values, "tolist") else values]
+    while queue:
+        item = queue.pop(0)
+        if isinstance(item, (list, tuple)):
+            queue[0:0] = list(item)
+        elif isinstance(item, (int, float)):
+            flat.append(float(item))
+    if min_length and len(flat) < min_length:
+        return flat
+    return flat[:min_length] if min_length else flat
 
 
 def offset_pose_z(pose: Sequence[float], dz_mm: float) -> list[float]:
@@ -30,7 +50,9 @@ def offset_joint_tcp_translation(
     tcp_out = fkin(j)
     if isinstance(tcp_out, int) and tcp_out == -1:
         raise RuntimeError("fkin failed for joint TCP offset")
-    tcp = [float(v) for v in tcp_out]
+    tcp = flatten_pose_values(tcp_out)
+    if len(tcp) < 6:
+        raise RuntimeError("fkin returned incomplete TCP pose")
     tcp[0] += dx
     tcp[1] += dy
     tcp[2] += dz

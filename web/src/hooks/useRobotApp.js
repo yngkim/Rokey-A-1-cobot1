@@ -249,6 +249,21 @@ export function useRobotApp(speechRef) {
     }
   }, [safetyDeciding, showToast])
 
+  const markTaskStarted = useCallback((taskId) => {
+    setBusy(true)
+    setActiveTaskId(taskId)
+    updateTaskLabel(taskId, VOICE_TASK_LABELS[taskId] || '')
+    setStopping(false)
+  }, [updateTaskLabel])
+
+  const markVoiceChainStarted = useCallback((commandId) => {
+    voiceChainRef.current = true
+    setBusy(true)
+    setActiveTaskId(commandId)
+    updateTaskLabel(commandId, VOICE_TASK_LABELS[commandId] || '')
+    setStopping(false)
+  }, [updateTaskLabel])
+
   useEffect(() => {
     refreshHealth()
 
@@ -273,6 +288,18 @@ export function useRobotApp(speechRef) {
         if (text) {
           speechRef?.current?.speakText?.(text)
         }
+        return
+      }
+
+      if (msg.type === 'medication_auto') {
+        const data = msg.data || {}
+        if (data.success) {
+          markVoiceChainStarted('prepare_medication')
+          showToast(data.message || '약 시간에 맞춰 약 준비를 시작했습니다')
+        } else if (data.message) {
+          showToast(data.message, 'info')
+        }
+        refreshHealth()
         return
       }
 
@@ -359,7 +386,7 @@ export function useRobotApp(speechRef) {
       clearStopTimeout()
       ws.close()
     }
-  }, [applySync, clearBusy, clearStopTimeout, refreshHealth, showObjectMissingAlert, showSafetyAlert, showToast, speechRef])
+  }, [applySync, clearBusy, clearStopTimeout, markVoiceChainStarted, refreshHealth, showObjectMissingAlert, showSafetyAlert, showToast, speechRef])
 
   return {
     tasks,
@@ -385,18 +412,7 @@ export function useRobotApp(speechRef) {
     resetting,
     safetyDeciding,
     clearAlert: () => setAlert(null),
-    markTaskStarted: (taskId) => {
-      setBusy(true)
-      setActiveTaskId(taskId)
-      updateTaskLabel(taskId, VOICE_TASK_LABELS[taskId] || '')
-      setStopping(false)
-    },
-    markVoiceChainStarted: (commandId) => {
-      voiceChainRef.current = true
-      setBusy(true)
-      setActiveTaskId(commandId)
-      updateTaskLabel(commandId, VOICE_TASK_LABELS[commandId] || '')
-      setStopping(false)
-    },
+    markTaskStarted,
+    markVoiceChainStarted,
   }
 }

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { fetchAlerts, fetchDashboard, formatTs } from '../../api/adminClient'
+import CameraMonitor from '../components/CameraMonitor'
 import ControlPanel from '../components/ControlPanel'
 import StatusBadge from '../components/StatusBadge'
 
@@ -39,53 +40,58 @@ export default function DashboardPage({ ws }) {
         </div>
       )}
 
-      <div className="admin-grid">
-        <div className="admin-card">
-          <div className="admin-card-label">API</div>
-          <div className="admin-card-value">
-            <StatusBadge kind={dash?.api_ok ? 'on' : 'danger'}>
-              {dash?.api_ok ? '정상' : '오프라인'}
-            </StatusBadge>
+      <div className="admin-dashboard-top">
+        <div className="admin-dashboard-status">
+          <div className="admin-status-grid">
+            <div className="admin-card">
+              <div className="admin-card-label">API</div>
+              <div className="admin-card-value">
+                <StatusBadge kind={dash?.api_ok ? 'on' : 'danger'}>
+                  {dash?.api_ok ? '정상' : '오프라인'}
+                </StatusBadge>
+              </div>
+            </div>
+            <div className="admin-card">
+              <div className="admin-card-label">로봇</div>
+              <div className="admin-card-value">
+                <StatusBadge kind={dash?.robot_ready ? 'on' : 'warn'}>
+                  {dash?.robot_ready ? 'Ready' : '대기'}
+                </StatusBadge>
+              </div>
+            </div>
+            <div className="admin-card">
+              <div className="admin-card-label">로봇 상태</div>
+              <div className="admin-card-value">
+                <StatusBadge kind={['SAFE_STOP', 'EMERGENCY_STOP', 'SAFE_STOP2'].includes(robotLabel) ? 'danger' : 'info'}>
+                  {robotLabel}
+                </StatusBadge>
+              </div>
+            </div>
+            <div className="admin-card">
+              <div className="admin-card-label">실행 중</div>
+              <div className="admin-card-value">
+                <StatusBadge kind={dash?.busy ? 'warn' : 'off'}>
+                  {dash?.busy ? dash.current_task_label || dash.current_task : '유휴'}
+                </StatusBadge>
+              </div>
+            </div>
+            <div className="admin-card">
+              <div className="admin-card-label">현재 단계</div>
+              <div className="admin-card-value admin-card-value--text">
+                {ws.status?.step || dash?.current_step || '-'}
+              </div>
+            </div>
+            <div className="admin-card">
+              <div className="admin-card-label">유지보수</div>
+              <div className="admin-card-value">
+                <StatusBadge kind={maintenance ? 'warn' : 'off'}>
+                  {maintenance ? 'ON' : 'OFF'}
+                </StatusBadge>
+              </div>
+            </div>
           </div>
         </div>
-        <div className="admin-card">
-          <div className="admin-card-label">로봇</div>
-          <div className="admin-card-value">
-            <StatusBadge kind={dash?.robot_ready ? 'on' : 'warn'}>
-              {dash?.robot_ready ? 'Ready' : '대기'}
-            </StatusBadge>
-          </div>
-        </div>
-        <div className="admin-card">
-          <div className="admin-card-label">로봇 상태</div>
-          <div className="admin-card-value">
-            <StatusBadge kind={['SAFE_STOP', 'EMERGENCY_STOP', 'SAFE_STOP2'].includes(robotLabel) ? 'danger' : 'info'}>
-              {robotLabel}
-            </StatusBadge>
-          </div>
-        </div>
-        <div className="admin-card">
-          <div className="admin-card-label">실행 중</div>
-          <div className="admin-card-value">
-            <StatusBadge kind={dash?.busy ? 'warn' : 'off'}>
-              {dash?.busy ? dash.current_task_label || dash.current_task : '유휴'}
-            </StatusBadge>
-          </div>
-        </div>
-        <div className="admin-card">
-          <div className="admin-card-label">현재 단계</div>
-          <div className="admin-card-value" style={{ fontSize: '0.95rem' }}>
-            {ws.status?.step || dash?.current_step || '-'}
-          </div>
-        </div>
-        <div className="admin-card">
-          <div className="admin-card-label">유지보수</div>
-          <div className="admin-card-value">
-            <StatusBadge kind={maintenance ? 'warn' : 'off'}>
-              {maintenance ? 'ON' : 'OFF'}
-            </StatusBadge>
-          </div>
-        </div>
+        <CameraMonitor className="admin-dashboard-camera" />
       </div>
 
       <ControlPanel maintenance={maintenance} onChanged={refresh} />
